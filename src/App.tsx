@@ -103,11 +103,30 @@ export default function App() {
         });
       }
 
-      const blocks = qText.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean);
+      const parsedBlocks: string[][] = [];
+      let currentBlock: string[] = [];
+      const linesArr = qText.split('\n').map(l => l.trim()).filter(Boolean);
+      
+      linesArr.forEach(line => {
+        if (/^\d+[\.\)\-]?\s+/.test(line)) {
+          if (currentBlock.length > 0) {
+            parsedBlocks.push(currentBlock);
+          }
+          currentBlock = [line];
+        } else {
+          currentBlock.push(line);
+        }
+      });
+      if (currentBlock.length > 0) {
+        parsedBlocks.push(currentBlock);
+      }
+
+      const finalBlocks = parsedBlocks.length > 1 ? parsedBlocks : 
+        qText.split(/\n\s*\n/).map(b => b.split('\n').map(l => l.trim()).filter(Boolean)).filter(b => b.length > 0);
+
       const converted: Question[] = [];
 
-      blocks.forEach((block, blockIdx) => {
-        const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+      finalBlocks.forEach((lines, blockIdx) => {
         if (lines.length < 2) return;
 
         const rawTitle = lines[0];
@@ -162,11 +181,30 @@ export default function App() {
     }
 
     try {
-      const blocks = text.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean);
+      const parsedBlocks: string[][] = [];
+      let currentBlock: string[] = [];
+      const linesArr = text.split('\n').map(l => l.trim()).filter(Boolean);
+      
+      linesArr.forEach(line => {
+        if (/^\d+[\.\)\-]?\s+/.test(line)) {
+          if (currentBlock.length > 0) {
+            parsedBlocks.push(currentBlock);
+          }
+          currentBlock = [line];
+        } else {
+          currentBlock.push(line);
+        }
+      });
+      if (currentBlock.length > 0) {
+        parsedBlocks.push(currentBlock);
+      }
+
+      const finalBlocks = parsedBlocks.length > 1 ? parsedBlocks : 
+        text.split(/\n\s*\n/).map(b => b.split('\n').map(l => l.trim()).filter(Boolean)).filter(b => b.length > 0);
+
       const converted: Question[] = [];
 
-      blocks.forEach((block) => {
-        const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+      finalBlocks.forEach((lines) => {
         if (lines.length < 2) return;
 
         const questionText = lines[0].replace(/^\d+[\.\)\s-]+\s*/, '');
