@@ -125,22 +125,26 @@ export default function App() {
     const linesArr = text.split('\n').map(l => l.trim()).filter(Boolean);
     
     const isOption = (line: string) => {
-        return /^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]\s+/i.test(line) || 
+        return /^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]\s*/i.test(line) || 
                /^(?:\*|\[x\]\s*)?[a-eA-E]\s+/i.test(line);
     };
 
     const isNumbering = (line: string) => {
-        return /^\d+[\.\)\-]?\s+/.test(line);
+        return /^\d+[\.\)\-]\s*/.test(line) || /^\d+\s+/.test(line) || /^soal\s+\d+/i.test(line);
     };
 
     linesArr.forEach(line => {
         if (isOption(line)) {
             currentALines.push(line);
         } else {
-            if (currentALines.length > 0 || (currentQLines.length > 0 && isNumbering(line))) {
-                parsedBlocks.push({ qLines: currentQLines, aLines: currentALines });
-                currentQLines = [line];
-                currentALines = [];
+            if (currentALines.length > 0) {
+                if (isNumbering(line)) {
+                    parsedBlocks.push({ qLines: currentQLines, aLines: currentALines });
+                    currentQLines = [line];
+                    currentALines = [];
+                } else {
+                    currentALines[currentALines.length - 1] += '\n' + line;
+                }
             } else {
                 currentQLines.push(line);
             }
@@ -213,7 +217,7 @@ export default function App() {
 
         const answers: Answer[] = [];
         block.aLines.forEach(line => {
-           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s+/i, '').trim();
+           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s*/i, '').trim();
            const letterMatch = line.match(/^(?:\*|\[x\]\s*)?([a-eA-E])/i);
            const letter = letterMatch ? letterMatch[1].toLowerCase() : '';
            let isCorrect = targetKeys.includes(letter);
@@ -277,7 +281,7 @@ export default function App() {
         const answers: Answer[] = [];
         block.aLines.forEach(line => {
            const isCorrect = line.startsWith('*') || line.toLowerCase().startsWith('[x]');
-           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s+/i, '').trim();
+           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s*/i, '').trim();
            answers.push({ text: cleanOpt, isCorrect });
         });
 
