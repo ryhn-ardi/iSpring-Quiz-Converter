@@ -1,0 +1,6 @@
+{
+  "name": "Melanjutkan Proyek HTML",
+  "description": "Melanjutkan pengembangan proyek web HTML sesuai permintaan pengguna.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
