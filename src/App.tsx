@@ -8,7 +8,7 @@ import * as XLSX from 'xlsx';
 
 // Types
 type Answer = { text: string; isCorrect: boolean };
-type Question = { type: 'MC'; question: string; answers: Answer[]; points: number };
+type Question = { type: 'MC' | 'MR'; question: string; answers: Answer[]; points: number };
 type ToastState = { message: string; type: 'info' | 'success' | 'error'; visible: boolean };
 
 // Initial Sample Data
@@ -63,13 +63,11 @@ export default function App() {
   };
 
   const clearInput = () => {
-    if (mode === 'auto') {
-      setAutoQuestions('');
-      setAutoKeys('');
-    } else {
-      setRuleText('');
-    }
-    showToast('Input dibersihkan.', 'info');
+    setAutoQuestions('');
+    setAutoKeys('');
+    setRuleText('');
+    setConvertedQuestions([]);
+    showToast('Semua input dibersihkan.', 'info');
   };
 
   const konversiOtomatisTerpisah = () => {
@@ -82,23 +80,27 @@ export default function App() {
     }
 
     try {
-      const keysMap = new Map<number, string>();
-      const keyRegex = /(\d+)[\s\.\-\=\:]*([a-jA-J])/g;
-      let match;
+      const keysMap = new Map<number, string[]>();
+      const lines = kText.split('\n');
       
-      while ((match = keyRegex.exec(kText)) !== null) {
-        keysMap.set(parseInt(match[1], 10), match[2].toLowerCase());
-      }
+      lines.forEach(line => {
+        const cleanLine = line.trim().toLowerCase();
+        const numMatch = cleanLine.match(/^(\d+)[\s\.\-\=\:]+(.*)/);
+        if (numMatch) {
+          const qNum = parseInt(numMatch[1], 10);
+          const letters = (numMatch[2].match(/\b([a-j])\b/g) || []);
+          if (letters.length > 0) {
+            keysMap.set(qNum, [...new Set(letters)]);
+          }
+        }
+      });
 
       if (keysMap.size === 0) {
-        const lines = kText.split('\n');
         lines.forEach((line, idx) => {
           const cleanLine = line.trim().toLowerCase();
-          if (cleanLine) {
-            const charMatch = cleanLine.match(/^[a-j]/);
-            if (charMatch) {
-              keysMap.set(idx + 1, charMatch[0]);
-            }
+          const letters = (cleanLine.match(/\b([a-j])\b/g) || []);
+          if (letters.length > 0) {
+            keysMap.set(idx + 1, [...new Set(letters)]);
           }
         });
       }
@@ -133,7 +135,7 @@ export default function App() {
         const numMatch = rawTitle.match(/^(\d+)/);
         const qNum = numMatch ? parseInt(numMatch[1], 10) : (blockIdx + 1);
 
-        const targetKey = keysMap.get(qNum);
+        const targetKeys = keysMap.get(qNum) || [];
         const cleanQuestionText = rawTitle.replace(/^\d+[\.\)\s-]+\s*/, '');
         const answers: Answer[] = [];
 
@@ -142,9 +144,9 @@ export default function App() {
           const optionLetterMatch = line.match(/^([a-jA-J])[\.\)\s-]/);
           let isCorrect = false;
 
-          if (optionLetterMatch && targetKey) {
+          if (optionLetterMatch) {
             const currentLetter = optionLetterMatch[1].toLowerCase();
-            if (currentLetter === targetKey) {
+            if (targetKeys.includes(currentLetter)) {
               isCorrect = true;
             }
           }
@@ -153,8 +155,10 @@ export default function App() {
           answers.push({ text: cleanedVal, isCorrect });
         }
 
+        const isMR = answers.filter(a => a.isCorrect).length > 1;
+
         converted.push({
-          type: 'MC',
+          type: isMR ? 'MR' : 'MC',
           question: cleanQuestionText,
           answers,
           points: defaultPoints
@@ -223,8 +227,10 @@ export default function App() {
           answers.push({ text: cleanedVal, isCorrect });
         }
 
+        const isMR = answers.filter(a => a.isCorrect).length > 1;
+
         converted.push({
-          type: 'MC',
+          type: isMR ? 'MR' : 'MC',
           question: questionText,
           answers,
           points: defaultPoints
@@ -336,8 +342,8 @@ export default function App() {
                   <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis:</p>
                   <ul className="list-disc pl-4 space-y-1">
                     <li>Tempelkan daftar soal polos Anda pada kolom <b>Daftar Soal Polos</b> di bawah.</li>
-                    <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1.D, 2.B</code>).</li>
-                    <li>Aplikasi akan otomatis mencari opsi yang sesuai dengan kunci dan memberikannya tanda bintang (*).</li>
+                    <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A dan B</code> untuk ganda).</li>
+                    <li>Aplikasi akan otomatis mencari opsi yang sesuai dengan kunci. Soal akan otomatis terdeteksi sebagai <b>MC</b> atau <b>MR (Multiple Response)</b>.</li>
                   </ul>
                 </div>
 
@@ -455,7 +461,7 @@ export default function App() {
                     return (
                       <div key={idx} className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm relative">
                         <div className="absolute right-4 top-4 bg-indigo-50 text-indigo-700 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                          SOAL {idx + 1}
+                          SOAL {idx + 1} ({q.type})
                         </div>
                         <p className="text-sm font-semibold text-slate-900 pr-12 mb-3 leading-relaxed">
                           {idx + 1}. {q.question}
