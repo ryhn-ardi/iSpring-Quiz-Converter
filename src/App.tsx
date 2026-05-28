@@ -2,13 +2,13 @@ import React, { useState } from 'react';
 import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
-  AlertTriangle, Info, UploadCloud, Loader2
+  AlertTriangle, Info, UploadCloud, Loader2, Image as ImageIcon
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 // Types
 type Answer = { text: string; isCorrect: boolean };
-type Question = { type: 'MC' | 'MR'; question: string; answers: Answer[]; points: number };
+type Question = { type: 'MC' | 'MR'; question: string; answers: Answer[]; points: number; image?: string };
 type ToastState = { message: string; type: 'info' | 'success' | 'error'; visible: boolean };
 
 // Initial Sample Data
@@ -117,6 +117,42 @@ export default function App() {
     showToast('Semua input dibersihkan.', 'info');
   };
 
+  const parseBlocks = (text: string) => {
+    let parsedBlocks: { qLines: string[], aLines: string[] }[] = [];
+    let currentQLines: string[] = [];
+    let currentALines: string[] = [];
+    
+    const linesArr = text.split('\n').map(l => l.trim()).filter(Boolean);
+    
+    const isOption = (line: string) => {
+        return /^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]\s+/i.test(line) || 
+               /^(?:\*|\[x\]\s*)?[a-eA-E]\s+/i.test(line);
+    };
+
+    const isNumbering = (line: string) => {
+        return /^\d+[\.\)\-]?\s+/.test(line);
+    };
+
+    linesArr.forEach(line => {
+        if (isOption(line)) {
+            currentALines.push(line);
+        } else {
+            if (currentALines.length > 0 || (currentQLines.length > 0 && isNumbering(line))) {
+                parsedBlocks.push({ qLines: currentQLines, aLines: currentALines });
+                currentQLines = [line];
+                currentALines = [];
+            } else {
+                currentQLines.push(line);
+            }
+        }
+    });
+
+    if (currentQLines.length > 0 || currentALines.length > 0) {
+        parsedBlocks.push({ qLines: currentQLines, aLines: currentALines });
+    }
+    return parsedBlocks;
+  };
+
   const konversiOtomatisTerpisah = () => {
     const qText = autoQuestions.trim();
     const kText = autoKeys.trim();
@@ -152,55 +188,38 @@ export default function App() {
         });
       }
 
-      const parsedBlocks: string[][] = [];
-      let currentBlock: string[] = [];
-      const linesArr = qText.split('\n').map(l => l.trim()).filter(Boolean);
-      
-      linesArr.forEach(line => {
-        if (/^\d+[\.\)\-]?\s+/.test(line)) {
-          if (currentBlock.length > 0) {
-            parsedBlocks.push(currentBlock);
-          }
-          currentBlock = [line];
-        } else {
-          currentBlock.push(line);
-        }
-      });
-      if (currentBlock.length > 0) {
-        parsedBlocks.push(currentBlock);
-      }
-
-      const finalBlocks = parsedBlocks.length > 1 ? parsedBlocks : 
-        qText.split(/\n\s*\n/).map(b => b.split('\n').map(l => l.trim()).filter(Boolean)).filter(b => b.length > 0);
-
+      const parsedBlocks = parseBlocks(qText);
       const converted: Question[] = [];
 
-      finalBlocks.forEach((lines, blockIdx) => {
-        if (lines.length < 2) return;
+      parsedBlocks.forEach((block, blockIdx) => {
+        let rawTitle = block.qLines.join('\n').trim();
+        if(!rawTitle && block.aLines.length > 0) {
+            rawTitle = block.aLines.shift() || '';
+        }
+        if (!rawTitle) return;
 
-        const rawTitle = lines[0];
-        const numMatch = rawTitle.match(/^(\d+)/);
+        const numMatch = rawTitle.match(/^(\d+)[\.\)\s-]+/);
         const qNum = numMatch ? parseInt(numMatch[1], 10) : (blockIdx + 1);
 
         const targetKeys = keysMap.get(qNum) || [];
-        const cleanQuestionText = rawTitle.replace(/^\d+[\.\)\s-]+\s*/, '');
-        const answers: Answer[] = [];
-
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i];
-          const optionLetterMatch = line.match(/^([a-jA-J])[\.\)\s-]/);
-          let isCorrect = false;
-
-          if (optionLetterMatch) {
-            const currentLetter = optionLetterMatch[1].toLowerCase();
-            if (targetKeys.includes(currentLetter)) {
-              isCorrect = true;
-            }
-          }
-
-          const cleanedVal = line.replace(/^[a-jA-J0-9][\.\)\s-]+\s*/, '').trim();
-          answers.push({ text: cleanedVal, isCorrect });
+        let cleanQuestionText = rawTitle.replace(/^\d+[\.\)\s-]+\s*/, '');
+        
+        let image = '';
+        const imgMatch = cleanQuestionText.match(/\[Gambar(?:[:\s]*(.*?))?\]/i);
+        if (imgMatch) {
+            image = `gambar_soal_${qNum}.jpg`;
+            cleanQuestionText = cleanQuestionText.replace(/\[Gambar(?:[:\s]*(.*?))?\]/i, '').trim();
         }
+
+        const answers: Answer[] = [];
+        block.aLines.forEach(line => {
+           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s+/i, '').trim();
+           const letterMatch = line.match(/^(?:\*|\[x\]\s*)?([a-eA-E])/i);
+           const letter = letterMatch ? letterMatch[1].toLowerCase() : '';
+           let isCorrect = targetKeys.includes(letter);
+           
+           answers.push({ text: cleanOpt, isCorrect });
+        });
 
         const isMR = answers.filter(a => a.isCorrect).length > 1;
 
@@ -208,7 +227,8 @@ export default function App() {
           type: isMR ? 'MR' : 'MC',
           question: cleanQuestionText,
           answers,
-          points: defaultPoints
+          points: defaultPoints,
+          image
         });
       });
 
@@ -232,55 +252,43 @@ export default function App() {
     }
 
     try {
-      const parsedBlocks: string[][] = [];
-      let currentBlock: string[] = [];
-      const linesArr = text.split('\n').map(l => l.trim()).filter(Boolean);
-      
-      linesArr.forEach(line => {
-        if (/^\d+[\.\)\-]?\s+/.test(line)) {
-          if (currentBlock.length > 0) {
-            parsedBlocks.push(currentBlock);
-          }
-          currentBlock = [line];
-        } else {
-          currentBlock.push(line);
-        }
-      });
-      if (currentBlock.length > 0) {
-        parsedBlocks.push(currentBlock);
-      }
-
-      const finalBlocks = parsedBlocks.length > 1 ? parsedBlocks : 
-        text.split(/\n\s*\n/).map(b => b.split('\n').map(l => l.trim()).filter(Boolean)).filter(b => b.length > 0);
-
+      const parsedBlocks = parseBlocks(text);
       const converted: Question[] = [];
 
-      finalBlocks.forEach((lines) => {
-        if (lines.length < 2) return;
-
-        const questionText = lines[0].replace(/^\d+[\.\)\s-]+\s*/, '');
-        const answers: Answer[] = [];
-
-        for (let i = 1; i < lines.length; i++) {
-          let line = lines[i];
-          let isCorrect = false;
-
-          if (line.startsWith('*') || line.toLowerCase().startsWith('[x]')) {
-            isCorrect = true;
-            line = line.replace(/^\*\s*/, '').replace(/^\[x\]\s*/i, '');
-          }
-
-          const cleanedVal = line.replace(/^[a-jA-J0-9][\.\)\s-]+\s*/, '').trim();
-          answers.push({ text: cleanedVal, isCorrect });
+      parsedBlocks.forEach((block, blockIdx) => {
+        let rawTitle = block.qLines.join('\n').trim();
+        if(!rawTitle && block.aLines.length > 0) {
+            rawTitle = block.aLines.shift() || '';
         }
+        if (!rawTitle) return;
+
+        const numMatch = rawTitle.match(/^(\d+)[\.\)\s-]+/);
+        const qNum = numMatch ? parseInt(numMatch[1], 10) : (blockIdx + 1);
+
+        let cleanQuestionText = rawTitle.replace(/^\d+[\.\)\s-]+\s*/, '');
+        
+        let image = '';
+        const imgMatch = cleanQuestionText.match(/\[Gambar(?:[:\s]*(.*?))?\]/i);
+        if (imgMatch) {
+            image = `gambar_soal_${qNum}.jpg`;
+            cleanQuestionText = cleanQuestionText.replace(/\[Gambar(?:[:\s]*(.*?))?\]/i, '').trim();
+        }
+
+        const answers: Answer[] = [];
+        block.aLines.forEach(line => {
+           const isCorrect = line.startsWith('*') || line.toLowerCase().startsWith('[x]');
+           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s+/i, '').trim();
+           answers.push({ text: cleanOpt, isCorrect });
+        });
 
         const isMR = answers.filter(a => a.isCorrect).length > 1;
 
         converted.push({
           type: isMR ? 'MR' : 'MC',
-          question: questionText,
+          question: cleanQuestionText,
           answers,
-          points: defaultPoints
+          points: defaultPoints,
+          image
         });
       });
 
@@ -307,14 +315,15 @@ export default function App() {
     ];
 
     const rows: string[][] = [];
-    convertedQuestions.forEach(q => {
+    convertedQuestions.forEach((q, idx) => {
       const row = Array(18).fill('');
       row[0] = q.type;
       row[1] = q.question;
+      row[2] = q.image || '';
       
-      q.answers.forEach((ans, idx) => {
-        if (idx < 10) {
-          row[5 + idx] = ans.isCorrect ? `*${ans.text}` : ans.text;
+      q.answers.forEach((ans, optIdx) => {
+        if (optIdx < 10) {
+          row[5 + optIdx] = ans.isCorrect ? `*${ans.text}` : ans.text;
         }
       });
 
@@ -518,7 +527,13 @@ export default function App() {
                         <div className="absolute right-4 top-4 bg-indigo-50 text-indigo-700 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
                           SOAL {idx + 1} ({q.type})
                         </div>
-                        <p className="text-sm font-semibold text-slate-900 pr-12 mb-3 leading-relaxed">
+                        {q.image && (
+                          <div className="mt-2 mb-3 bg-amber-50 text-amber-700 text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-2 border border-amber-200">
+                            <ImageIcon className="w-4 h-4" />
+                            File Dibutuhkan: {q.image}
+                          </div>
+                        )}
+                        <p className="text-sm font-semibold text-slate-900 pr-12 mb-4 whitespace-pre-wrap leading-relaxed">
                           {idx + 1}. {q.question}
                         </p>
                         <div className="grid grid-cols-1 gap-2">

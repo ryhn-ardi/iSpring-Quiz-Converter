@@ -40,21 +40,17 @@ app.post('/api/parse-document', upload.single('file'), async (req, res) => {
     
     let parts: any[] = [];
     const promptText = `
-Anda adalah asisten ekstraktor soal ujian yang sangat cerdas. 
+Anda adalah asisten ekstraktor naskah ujian.
 Saya memberikan sebuah dokumen (teks, DOCX, atau file PDF) yang mengandung kumpulan soal pilihan ganda dan kunci jawaban.
+Jika dokumen berupa naskah ujian Matematika atau Fisika, bacalah setiap persamaan, angka, simbol matematika, dan gambar dengan sangat teliti.
 
 Tugas dan Aturan Khusus:
-1. Pisahkan secara spesifik mana bagian naskah soal dan mana kunci jawaban.
-2. **Soal Matematika/Rumus**: Jika ada rumus matematika, angka kompleks, atau persamaan, ekstrak dan tulis ulang dengan rapi (bisa mendekati format aslinya atau menggunakan teks baku).
-3. **Soal Bergambar**:
-    - Jika Anda memproses file PDF dan "melihat" ada ilustrasi/gambar pada suatu soal, sisipkan teks \`[Gambar: deskripsi singkat gambar]\` pada teks pertanyaan tersebut.
-    - Jika memproses teks DOCX/TXT dan menemukan placeholder \`[Gambar]\`, pertahankan posisi placeholder tersebut di soal.
-4. Jangan mengubah makna soal, cukup rapikan keamanannya.
-5. Keluarkan hasil akhir dalam format JSON yang valid dan murni dengan dua property:
-   - "questions": string berisi daftar seluruh soal yang dirapikan beserta pilihan gandanya (A, B, C, D, E). Pisahkan tiap soal dengan spasi yang jelas.
-   - "keys": string berisi daftar kunci jawaban, berurutan ke bawah (contoh: 1. A \\n 2. C \\n 3. A dan B).
-
-PENTING: Hanya kembalikan string JSON murni tanpa markdown block formatter (tanpa awalan \`\`\`json).
+1. Ekstrak teks soal secara persis, terutama angka, persamaan matematika, pecahan, dan simbol-simbol. Jangan mengubah nomor urut soal atau menghilangkannya.
+2. Jika ada gambar atau ilustrasi pada soal, sisipkan teks \`[Gambar: <deskripsi singkat>]\` pada posisi yang tepat.
+3. Pisahkan antara bagian "Soal" (termasuk opsi A, B, C, dst) dan "Kunci Jawaban".
+4. Kembalikan output dalam format JSON murni dengan properti:
+   - "questions": string panjang yang berisi *seluruh* naskah soal yang dirapikan, lengkap dengan opsi-opsi jawabannya. Pertahankan baris baru (enter/newline) agar mudah dibaca.
+   - "keys": string yang berisi daftar kunci jawaban berurut ke bawah (contoh: 1. A \\n 2. B).
 `;
 
     if (mimeType === 'application/pdf') {
@@ -86,19 +82,19 @@ PENTING: Hanya kembalikan string JSON murni tanpa markdown block formatter (tanp
       }
 
       parts = [
-        { text: `Teks Dokumen:\n${extractedText.substring(0, 35000)}\n\n${promptText}` }
+        { text: `Teks Dokumen:\n${extractedText.substring(0, 40000)}\n\n${promptText}` }
       ];
     } else if (mimeType === 'text/plain') {
       const extractedText = buffer.toString('utf-8');
       parts = [
-        { text: `Teks Dokumen:\n${extractedText.substring(0, 35000)}\n\n${promptText}` }
+        { text: `Teks Dokumen:\n${extractedText.substring(0, 40000)}\n\n${promptText}` }
       ];
     } else {
       return res.status(400).json({ error: 'Tipe file tidak didukung. Harap unggah PDF, DOCX, atau TXT.' });
     }
 
     const response = await genAI.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-2.5-pro',
         contents: [
           { role: 'user', parts: parts }
         ],
