@@ -79,7 +79,19 @@ export default function App() {
         body: formData,
       });
 
-      const data = await res.json();
+      let data;
+      const responseText = await res.text();
+      try {
+        data = JSON.parse(responseText);
+      } catch (err) {
+        if (res.status === 413) {
+            throw new Error('File terlalu besar. Nginx menolak file untuk diunggah.');
+        } else if (res.status === 504 || res.status === 502) {
+            throw new Error('Waktu tunggu habis (Timeout). File mungkin terlalu besar untuk diproses AI, coba file yang lebih kecil.');
+        } else {
+            throw new Error(`Server mengalami gangguan tidak terduga. Status: ${res.status}.`);
+        }
+      }
 
       if (!res.ok) {
           throw new Error(data.error || 'Gagal memroses file');

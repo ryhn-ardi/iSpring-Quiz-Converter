@@ -41,20 +41,20 @@ app.post('/api/parse-document', upload.single('file'), async (req, res) => {
     let parts: any[] = [];
     const promptText = `
 Anda adalah asisten ekstraktor soal ujian yang sangat cerdas. 
-Saya memberikan sebuah dokumen (teks atau file PDF) yang mengandung soal pilihan ganda dan kunci jawaban.
-Jika dokumen memiliki gambar (baik dalam PDF atau ada teks "[Gambar]"), pastikan Anda menuliskan teks "[Gambar]" pada bagian soal tersebut dengan format:
-Nomor. [Gambar] 
-Teks pertanyaan...
-a. opsi
-b. opsi
+Saya memberikan sebuah dokumen (teks, DOCX, atau file PDF) yang mengandung kumpulan soal pilihan ganda dan kunci jawaban.
 
-Tugas Anda:
-Pisahkan secara spesifik bagian naskah soal dan kunci jawaban.
-Keluarkan hasil akhir dalam format JSON yang valid dengan dua property:
-1. "questions": string berisi daftar soal beserta opsi pilihan ganda yang diformat rapi (dengan [Gambar] jika ada gambar, lalu opsi jawaban).
-2. "keys": string berisi daftar kunci jawaban, urut ke bawah (contoh: 1. A \\n 2. C).
+Tugas dan Aturan Khusus:
+1. Pisahkan secara spesifik mana bagian naskah soal dan mana kunci jawaban.
+2. **Soal Matematika/Rumus**: Jika ada rumus matematika, angka kompleks, atau persamaan, ekstrak dan tulis ulang dengan rapi (bisa mendekati format aslinya atau menggunakan teks baku).
+3. **Soal Bergambar**:
+    - Jika Anda memproses file PDF dan "melihat" ada ilustrasi/gambar pada suatu soal, sisipkan teks \`[Gambar: deskripsi singkat gambar]\` pada teks pertanyaan tersebut.
+    - Jika memproses teks DOCX/TXT dan menemukan placeholder \`[Gambar]\`, pertahankan posisi placeholder tersebut di soal.
+4. Jangan mengubah makna soal, cukup rapikan keamanannya.
+5. Keluarkan hasil akhir dalam format JSON yang valid dan murni dengan dua property:
+   - "questions": string berisi daftar seluruh soal yang dirapikan beserta pilihan gandanya (A, B, C, D, E). Pisahkan tiap soal dengan spasi yang jelas.
+   - "keys": string berisi daftar kunci jawaban, berurutan ke bawah (contoh: 1. A \\n 2. C \\n 3. A dan B).
 
-Hanya kembalikan string JSON murni tanpa markdown formatter (\`\`\`json).
+PENTING: Hanya kembalikan string JSON murni tanpa markdown block formatter (tanpa awalan \`\`\`json).
 `;
 
     if (mimeType === 'application/pdf') {
