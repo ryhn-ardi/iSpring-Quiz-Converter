@@ -402,7 +402,7 @@ export default function App() {
                   <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis:</p>
                   <ul className="list-disc pl-4 space-y-1">
                     <li>Tempelkan daftar soal polos Anda pada kolom <b>Daftar Soal Polos</b> di bawah.</li>
-                    <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A dan B</code> untuk ganda).</li>
+                    <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> atau <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A dan B</code> untuk ganda).</li>
                     <li>Aplikasi akan otomatis mencari opsi yang sesuai dengan kunci. Soal akan otomatis terdeteksi sebagai <b>MC</b> atau <b>MR (Multiple Response)</b>.</li>
                   </ul>
                 </div>

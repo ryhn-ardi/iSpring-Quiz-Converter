@@ -47,7 +47,7 @@ Tugas dan Aturan Khusus:
 3. Pisahkan antara bagian "Soal" (termasuk opsi A, B, C, dst) dan "Kunci Jawaban".
 4. Kembalikan output dalam format JSON murni dengan properti:
    - "questions": string panjang yang berisi *seluruh* naskah soal yang dirapikan, lengkap dengan opsi-opsi jawabannya. Pertahankan baris baru (enter/newline) agar mudah dibaca.
-   - "keys": string yang berisi daftar kunci jawaban berurut ke bawah (contoh: 1. A \\n 2. B).
+   - "keys": string yang berisi daftar kunci jawaban berurut ke bawah (contoh: 1. A \\n 2. A, B).
 `;
 
     if (mimeType === 'application/pdf') {
