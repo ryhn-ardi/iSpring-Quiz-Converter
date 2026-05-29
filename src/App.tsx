@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
-  AlertTriangle, Info, UploadCloud, Loader2, Image as ImageIcon
+  AlertTriangle, Info, Image as ImageIcon
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -54,59 +54,12 @@ export default function App() {
   const [defaultPoints, setDefaultPoints] = useState<number>(10);
   const [convertedQuestions, setConvertedQuestions] = useState<Question[]>([]);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
-  const [isUploading, setIsUploading] = useState(false);
 
   const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ message, type, visible: true });
     setTimeout(() => {
       setToast(prev => ({ ...prev, visible: false }));
     }, 4000);
-  };
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    setIsUploading(true);
-    showToast('Sedang membaca dan memroses dokumen via AI...', 'info');
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      const res = await fetch('/api/parse-document', {
-        method: 'POST',
-        body: formData,
-      });
-
-      let data;
-      const responseText = await res.text();
-      try {
-        data = JSON.parse(responseText);
-      } catch (err) {
-        if (res.status === 413) {
-            throw new Error('File terlalu besar. Nginx menolak file untuk diunggah.');
-        } else if (res.status === 504 || res.status === 502) {
-            throw new Error('Waktu tunggu habis (Timeout). File mungkin terlalu besar untuk diproses AI, coba file yang lebih kecil.');
-        } else {
-            throw new Error(`Server mengalami gangguan tidak terduga. Status: ${res.status}.`);
-        }
-      }
-
-      if (!res.ok) {
-          throw new Error(data.error || 'Gagal memroses file');
-      }
-
-      setAutoQuestions(data.questions || '');
-      setAutoKeys(data.keys || '');
-      showToast('Dokumen berhasil diekstrak otomatis! Silakan periksa hasilnya.', 'success');
-    } catch (error: any) {
-      showToast(error.message, 'error');
-    } finally {
-      setIsUploading(false);
-      // Reset input
-      event.target.value = '';
-    }
   };
 
   const clearInput = () => {
@@ -405,14 +358,6 @@ export default function App() {
                     <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> atau <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A dan B</code> untuk ganda).</li>
                     <li>Aplikasi akan otomatis mencari opsi yang sesuai dengan kunci. Soal akan otomatis terdeteksi sebagai <b>MC</b> atau <b>MR (Multiple Response)</b>.</li>
                   </ul>
-                </div>
-
-                <div className="flex sm:justify-end mb-2">
-                  <label className={`cursor-pointer w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2 border rounded-xl text-sm font-semibold transition-all ${isUploading ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-50 shadow-sm'}`}>
-                    {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
-                    {isUploading ? 'Memproses AI...' : 'Ekstrak Cerdas (PDF/DOCX)'}
-                    <input type="file" className="hidden" accept=".pdf,.docx,.txt" onChange={handleFileUpload} disabled={isUploading} />
-                  </label>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
