@@ -355,7 +355,7 @@ export default function App() {
               <FileSpreadsheet className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">iSpring Quiz Converter</h1>
+              <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">iSpring Quiz Converter Masansa</h1>
               <p className="text-xs text-slate-500 font-medium">Ubah Soal Teks Menjadi Template Excel iSpring Suite</p>
             </div>
           </div>

@@ -1,6 +1,6 @@
 {
-  "name": "Melanjutkan Proyek HTML",
-  "description": "Melanjutkan pengembangan proyek web HTML sesuai permintaan pengguna.",
+  "name": "iSpring Quiz Converter Masansa",
+  "description": "A web application built to convert quiz text to iSpring compatible format.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
