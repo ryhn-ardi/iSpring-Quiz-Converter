@@ -1,5 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bold, Italic, Underline, RemoveFormatting, FileUp, Table as TableIcon } from 'lucide-react';
+import {
+  Bold,
+  Italic,
+  Underline,
+  RemoveFormatting,
+  FileUp,
+  Table as TableIcon,
+  Sigma,
+} from 'lucide-react';
 import mammoth from 'mammoth';
 import {
   escapeHtml,
@@ -7,6 +15,8 @@ import {
   richNodesToEditorHtml,
   richNodesToHtml,
 } from '../utils/richText';
+import { MathEquationModal } from './MathEquationModal';
+import { MathRenderEngine } from '../utils/mathEngine';
 
 type RichQuizEditorProps = {
   valueHtml: string;
@@ -14,6 +24,7 @@ type RichQuizEditorProps = {
   placeholder?: string;
   onNotify?: (message: string, type: 'info' | 'success' | 'error') => void;
   onDocxFileSelected?: (file: File) => void | Promise<void>;
+  mathEngine?: MathRenderEngine;
 };
 
 export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
@@ -22,10 +33,13 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
   placeholder,
   onNotify,
   onDocxFileSelected,
+  mathEngine = 'katex',
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastHtmlRef = useRef<string>(valueHtml);
+  const savedRangeRef = useRef<Range | null>(null);
+  const [mathModalOpen, setMathModalOpen] = useState(false);
 
   const [activeFormats, setActiveFormats] = useState({
     bold: false,
@@ -108,6 +122,31 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
       '<tr><td>Data A2</td><td>Data B2</td></tr>' +
       '</tbody></table><div><br></div>';
     document.execCommand('insertHTML', false, tableHtml);
+    emitChange();
+  };
+
+  const openMathModal = () => {
+    const el = editorRef.current;
+    const sel = window.getSelection();
+    if (el && sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+      savedRangeRef.current = sel.getRangeAt(0).cloneRange();
+    } else {
+      savedRangeRef.current = null;
+    }
+    setMathModalOpen(true);
+  };
+
+  const insertMathSnippet = (delimitedCode: string) => {
+    const el = editorRef.current;
+    if (!el) return;
+    el.focus();
+    const sel = window.getSelection();
+    if (sel && savedRangeRef.current) {
+      sel.removeAllRanges();
+      sel.addRange(savedRangeRef.current);
+    }
+    document.execCommand('insertText', false, delimitedCode);
+    savedRangeRef.current = null;
     emitChange();
   };
 
@@ -249,6 +288,18 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
           >
             <TableIcon className="w-3.5 h-3.5" />
           </button>
+          <button
+            type="button"
+            title="Sisipkan Rumus Matematika (LaTeX / AsciiMath / Typst / MathML)"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              openMathModal();
+            }}
+            className="px-2 py-1 rounded-lg text-[11px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition-colors flex items-center gap-1 cursor-pointer"
+          >
+            <Sigma className="w-3.5 h-3.5" />
+            Rumus
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
@@ -289,6 +340,13 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
           className="w-full min-h-[256px] max-h-[380px] overflow-y-auto p-4 text-sm font-mono leading-relaxed text-slate-800 focus:outline-none [&_b]:font-bold [&_strong]:font-bold [&_i]:italic [&_em]:italic [&_u]:underline [&_table]:w-full [&_table]:border-collapse [&_table]:my-2 [&_table]:text-xs [&_td]:border [&_td]:border-slate-300 [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_th]:border [&_th]:border-slate-300 [&_th]:bg-slate-100 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:font-bold [&_th]:text-left"
         />
       </div>
+
+      <MathEquationModal
+        open={mathModalOpen}
+        onClose={() => setMathModalOpen(false)}
+        onInsert={insertMathSnippet}
+        defaultEngine={mathEngine}
+      />
     </div>
   );
 };

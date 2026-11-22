@@ -581,6 +581,28 @@ export function htmlToRichNodes(html: string): RichContentNode[] {
 
     if (SKIP_TAGS.has(tag)) return;
 
+    if (tag === 'MATH') {
+      pushSpan(el.outerHTML.replace(/\s+/g, ' ').trim(), flags);
+      return;
+    }
+
+    if (el.classList?.contains('katex')) {
+      const texAnn = el.querySelector('annotation[encoding="application/x-tex"]');
+      if (texAnn?.textContent) {
+        pushSpan(`$${texAnn.textContent.trim()}$`, flags);
+        return;
+      }
+      const mml = el.querySelector('math');
+      if (mml) {
+        pushSpan(mml.outerHTML.replace(/\s+/g, ' ').trim(), flags);
+        return;
+      }
+    }
+
+    if (el.classList?.contains('katex-html')) {
+      return;
+    }
+
     if (tag === 'TABLE') {
       if (currentLine.length > 0) {
         flushLine(false);

@@ -1,9 +1,10 @@
 import React, { useMemo, useRef, useState } from 'react';
+import 'katex/dist/katex.min.css';
 import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
   AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles, Table as TableIcon,
-  FileText, FileUp
+  FileText, FileUp, Sigma
 } from 'lucide-react';
 import { RichQuizEditor } from './components/RichQuizEditor';
 import {
@@ -16,6 +17,7 @@ import {
 } from './utils/quizParser';
 import {
   RichContentNode,
+  RichLine,
   RichTable,
   RichText,
   copyRichNodesToClipboard,
@@ -23,6 +25,7 @@ import {
   getFormattingSummary,
   hasRichFormatting,
   htmlToRichNodes,
+  richLineToPlain,
   richNodesToEditorHtml,
   richNodesToPlain,
 } from './utils/richText';
@@ -36,6 +39,23 @@ import {
   downloadSampleWordTemplate,
   parseDocxFile,
 } from './utils/docxImport';
+import {
+  DollarSyntaxMode,
+  MathExportMode,
+  MathRenderEngine,
+  convertMathToMathML,
+  hasMathInNodes,
+  hasMathInRichText,
+  hasMathInText,
+  renderMathToHtml,
+  splitTextWithMath,
+} from './utils/mathEngine';
+import {
+  downloadAllMathImages,
+  downloadQuestionMathPng,
+  extractMathSegmentsFromQuestion,
+  getMathImageFilename,
+} from './utils/mathImage';
 
 type ToastState = { message: string; type: 'info' | 'success' | 'error'; visible: boolean };
 
@@ -77,35 +97,146 @@ const SAMPLE_RULE_HTML = [
   '<div>d. Franz Schubert</div>',
 ].join('');
 
-function RichTextRenderer({ lines }: { lines: RichText }) {
+function renderPlainSliceWithSpans(
+  line: RichLine,
+  startOffset: number,
+  endOffset: number
+): React.ReactNode {
+  let pos = 0;
+  const parts: React.ReactNode[] = [];
+  line.forEach((span, idx) => {
+    const spanStart = pos;
+    const spanEnd = pos + span.text.length;
+    pos = spanEnd;
+
+    const overlapStart = Math.max(spanStart, startOffset);
+    const overlapEnd = Math.min(spanEnd, endOffset);
+    if (overlapStart >= overlapEnd) return;
+
+    const slice = span.text.slice(overlapStart - spanStart, overlapEnd - spanStart);
+    const classes = [
+      span.bold ? 'font-bold' : '',
+      span.italic ? 'italic' : '',
+      span.underline ? 'underline decoration-1 underline-offset-2' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    parts.push(
+      classes ? (
+        <span key={idx} className={classes}>
+          {slice}
+        </span>
+      ) : (
+        <React.Fragment key={idx}>{slice}</React.Fragment>
+      )
+    );
+  });
+  return parts;
+}
+
+function RichTextRenderer({
+  lines,
+  mathEngine = 'katex',
+  dollarSyntax = 'auto',
+}: {
+  lines: RichText;
+  mathEngine?: MathRenderEngine;
+  dollarSyntax?: DollarSyntaxMode;
+}) {
   return (
     <>
-      {lines.map((line, lineIdx) => (
-        <React.Fragment key={lineIdx}>
-          {lineIdx > 0 && <br />}
-          {line.map((span, spanIdx) => {
-            const classes = [
-              span.bold ? 'font-bold' : '',
-              span.italic ? 'italic' : '',
-              span.underline ? 'underline decoration-1 underline-offset-2' : '',
-            ]
-              .filter(Boolean)
-              .join(' ');
-            return classes ? (
-              <span key={spanIdx} className={classes}>
-                {span.text}
-              </span>
-            ) : (
-              <React.Fragment key={spanIdx}>{span.text}</React.Fragment>
-            );
-          })}
-        </React.Fragment>
-      ))}
+      {lines.map((line, lineIdx) => {
+        const plain = richLineToPlain(line);
+        const hasMath = hasMathInText(plain, dollarSyntax);
+
+        if (!hasMath) {
+          return (
+            <React.Fragment key={lineIdx}>
+              {lineIdx > 0 && <br />}
+              {line.map((span, spanIdx) => {
+                const classes = [
+                  span.bold ? 'font-bold' : '',
+                  span.italic ? 'italic' : '',
+                  span.underline ? 'underline decoration-1 underline-offset-2' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ');
+                return classes ? (
+                  <span key={spanIdx} className={classes}>
+                    {span.text}
+                  </span>
+                ) : (
+                  <React.Fragment key={spanIdx}>{span.text}</React.Fragment>
+                );
+              })}
+            </React.Fragment>
+          );
+        }
+
+        const segments = splitTextWithMath(plain, dollarSyntax);
+        let offset = 0;
+        return (
+          <React.Fragment key={lineIdx}>
+            {lineIdx > 0 && <br />}
+            {segments.map((seg, segIdx) => {
+              if (seg.type === 'text') {
+                const start = offset;
+                const end = offset + seg.text.length;
+                offset = end;
+                return (
+                  <React.Fragment key={segIdx}>
+                    {renderPlainSliceWithSpans(line, start, end)}
+                  </React.Fragment>
+                );
+              }
+              offset += seg.raw.length;
+              const rendered = renderMathToHtml(
+                seg.code,
+                seg.format,
+                mathEngine,
+                seg.display
+              );
+              if (rendered.error || !rendered.html) {
+                return (
+                  <code
+                    key={segIdx}
+                    className="px-1 py-0.5 rounded bg-rose-50 text-rose-700 text-xs font-mono"
+                    title={rendered.error}
+                  >
+                    {seg.raw}
+                  </code>
+                );
+              }
+              return (
+                <span
+                  key={segIdx}
+                  className={
+                    seg.display
+                      ? 'block my-2 overflow-x-auto text-center [&_.katex-display]:my-1 [&_svg]:inline-block'
+                      : 'inline-block align-middle mx-0.5 [&_svg]:inline-block [&_svg]:align-middle'
+                  }
+                  title={`Format: ${seg.format.toUpperCase()}`}
+                  dangerouslySetInnerHTML={{ __html: rendered.html }}
+                />
+              );
+            })}
+          </React.Fragment>
+        );
+      })}
     </>
   );
 }
 
-function RichTableRenderer({ table }: { table: RichTable }) {
+function RichTableRenderer({
+  table,
+  mathEngine,
+  dollarSyntax,
+}: {
+  table: RichTable;
+  mathEngine: MathRenderEngine;
+  dollarSyntax: DollarSyntaxMode;
+}) {
   return (
     <div className="my-2.5 overflow-x-auto rounded-lg border border-slate-300 bg-white">
       <table className="w-full border-collapse text-xs">
@@ -121,7 +252,11 @@ function RichTableRenderer({ table }: { table: RichTable }) {
                       cell.isHeader ? 'bg-slate-100 font-bold text-slate-900' : 'text-slate-700'
                     }`}
                   >
-                    <RichTextRenderer lines={cell.lines} />
+                    <RichTextRenderer
+                      lines={cell.lines}
+                      mathEngine={mathEngine}
+                      dollarSyntax={dollarSyntax}
+                    />
                   </Tag>
                 );
               })}
@@ -136,9 +271,13 @@ function RichTableRenderer({ table }: { table: RichTable }) {
 function RichNodesRenderer({
   nodes,
   prefixNumber,
+  mathEngine,
+  dollarSyntax,
 }: {
   nodes: RichContentNode[];
   prefixNumber?: number;
+  mathEngine: MathRenderEngine;
+  dollarSyntax: DollarSyntaxMode;
 }) {
   let renderedPrefix = false;
   return (
@@ -147,7 +286,11 @@ function RichNodesRenderer({
         if (node.type === 'table') {
           return (
             <React.Fragment key={idx}>
-              <RichTableRenderer table={node} />
+              <RichTableRenderer
+                table={node}
+                mathEngine={mathEngine}
+                dollarSyntax={dollarSyntax}
+              />
             </React.Fragment>
           );
         }
@@ -156,7 +299,11 @@ function RichNodesRenderer({
         return (
           <p key={idx} className="whitespace-pre-wrap">
             {showPrefix && <span className="font-semibold">{prefixNumber}. </span>}
-            <RichTextRenderer lines={[node.spans]} />
+            <RichTextRenderer
+              lines={[node.spans]}
+              mathEngine={mathEngine}
+              dollarSyntax={dollarSyntax}
+            />
           </p>
         );
       })}
@@ -173,9 +320,13 @@ export default function App() {
   const [convertedQuestions, setConvertedQuestions] = useState<RichQuestion[]>([]);
   const [previewFilter, setPreviewFilter] = useState<'all' | 'formatted'>('all');
   const [tableExportMode, setTableExportMode] = useState<TableExportMode>('image');
+  const [mathEngine, setMathEngine] = useState<MathRenderEngine>('katex');
+  const [dollarSyntax, setDollarSyntax] = useState<DollarSyntaxMode>('auto');
+  const [mathExportMode, setMathExportMode] = useState<MathExportMode>('unicode');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingImages, setIsExportingImages] = useState(false);
+  const [isExportingMathImages, setIsExportingMathImages] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
   const headerDocxInputRef = useRef<HTMLInputElement>(null);
 
@@ -320,13 +471,19 @@ export default function App() {
     if (convertedQuestions.length === 0 || isExporting) return;
     setIsExporting(true);
     try {
-      const { filename, formattedCount, tableImageCount } = await exportRichQuizToExcel(
-        convertedQuestions,
-        tableExportMode
-      );
-      if (tableImageCount > 0) {
+      const { filename, formattedCount, tableImageCount, mathImageCount } =
+        await exportRichQuizToExcel(
+          convertedQuestions,
+          tableExportMode,
+          mathExportMode,
+          dollarSyntax
+        );
+      if (tableImageCount > 0 || mathImageCount > 0) {
+        const parts: string[] = [];
+        if (tableImageCount > 0) parts.push(`${tableImageCount} gambar tabel`);
+        if (mathImageCount > 0) parts.push(`${mathImageCount} gambar rumus`);
         showToast(
-          `Excel "${filename}" diunduh (${tableImageCount} tabel ditautkan ke kolom Image). Jangan lupa unduh gambar tabelnya!`,
+          `Excel "${filename}" diunduh (${parts.join(' & ')} ditautkan ke kolom Image). Jangan lupa unduh file gambarnya!`,
           'success'
         );
       } else if (formattedCount > 0) {
@@ -369,6 +526,57 @@ export default function App() {
     }
   };
 
+  const handleDownloadAllMath = async () => {
+    if (isExportingMathImages) return;
+    setIsExportingMathImages(true);
+    try {
+      const { count, filename } = await downloadAllMathImages(
+        convertedQuestions,
+        dollarSyntax
+      );
+      showToast(
+        `${count} gambar rumus berhasil diunduh (${filename}). Simpan satu folder dengan file Excel sebelum impor ke iSpring.`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal membuat gambar rumus', 'error');
+    } finally {
+      setIsExportingMathImages(false);
+    }
+  };
+
+  const handleDownloadSingleMath = async (q: RichQuestion, questionIdx: number) => {
+    try {
+      const filename = await downloadQuestionMathPng(q, questionIdx, dollarSyntax);
+      showToast(`Gambar rumus "${filename}" diunduh!`, 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengunduh gambar rumus', 'error');
+    }
+  };
+
+  const handleCopyQuestionMathML = async (
+    id: string,
+    q: RichQuestion,
+    questionIdx: number
+  ) => {
+    const segs = extractMathSegmentsFromQuestion(q, dollarSyntax);
+    if (segs.length === 0) return;
+    const mmlList = segs
+      .map((s) => convertMathToMathML(s.code, s.format, true))
+      .filter(Boolean);
+    if (mmlList.length === 0) {
+      showToast('Gagal mengonversi rumus ke MathML.', 'error');
+      return;
+    }
+    await navigator.clipboard?.writeText(mmlList.join('\n'));
+    setCopiedId(id);
+    setTimeout(() => setCopiedId((prev) => (prev === id ? null : prev)), 2000);
+    showToast(
+      `MathML Soal ${questionIdx + 1} disalin! Dapat langsung ditempel ke Word / editor MathML.`,
+      'success'
+    );
+  };
+
   const handleCopyQuestionRich = async (
     id: string,
     nodes: RichContentNode[],
@@ -401,12 +609,19 @@ export default function App() {
     );
   };
 
+  const questionHasMath = (q: RichQuestion) =>
+    hasMathInNodes(q.questionNodes, dollarSyntax) ||
+    q.answers.some((a) => hasMathInRichText(a.richText, dollarSyntax));
+
   const formattedQuestionsCount = useMemo(
     () =>
       convertedQuestions.filter(
-        (q) => questionHasRichFormatting(q) || questionHasTable(q)
+        (q) =>
+          questionHasRichFormatting(q) ||
+          questionHasTable(q) ||
+          questionHasMath(q)
       ).length,
-    [convertedQuestions]
+    [convertedQuestions, dollarSyntax]
   );
 
   const tableQuestionsCount = useMemo(
@@ -414,15 +629,22 @@ export default function App() {
     [convertedQuestions]
   );
 
+  const mathQuestionsCount = useMemo(
+    () => convertedQuestions.filter(questionHasMath).length,
+    [convertedQuestions, dollarSyntax]
+  );
+
   const displayedQuestions = useMemo(() => {
     return convertedQuestions
       .map((q, idx) => ({ q, originalIndex: idx }))
       .filter(({ q }) =>
         previewFilter === 'formatted'
-          ? questionHasRichFormatting(q) || questionHasTable(q)
+          ? questionHasRichFormatting(q) ||
+            questionHasTable(q) ||
+            questionHasMath(q)
           : true
       );
-  }, [convertedQuestions, previewFilter]);
+  }, [convertedQuestions, previewFilter, dollarSyntax]);
 
   return (
     <div className="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans">
@@ -528,6 +750,7 @@ export default function App() {
                       placeholder={'1. Pertanyaan contoh?\na. Opsi A\nb. Opsi B'}
                       onNotify={showToast}
                       onDocxFileSelected={handleImportDocx}
+                      mathEngine={mathEngine}
                     />
                   </div>
                   <div className="md:col-span-1 flex flex-col">
@@ -548,7 +771,7 @@ export default function App() {
             {mode === 'rule' && (
               <div className="space-y-4">
                 <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl text-xs text-slate-600">
-                  <p className="font-bold mb-1 text-slate-700">Aturan Penulisan Manual (Mendukung Bold / Italic / Underline / Tabel):</p>
+                  <p className="font-bold mb-1 text-slate-700">Aturan Penulisan Manual (Mendukung Bold / Italic / Underline / Tabel / Matematika):</p>
                   <ul className="list-disc pl-4 space-y-1">
                     <li>Pisahkan antarsoal dengan 1 baris kosong (Double Enter).</li>
                     <li>Tandai kunci jawaban dengan tanda bintang (<span className="text-red-500 font-bold">*</span>) di awal teks pilihan (Contoh: <i>*d. Era Klasik</i>).</li>
@@ -561,9 +784,22 @@ export default function App() {
                   placeholder="Tuliskan atau tempel soal dengan tanda bintang di sini..."
                   onNotify={showToast}
                   onDocxFileSelected={handleImportDocx}
+                  mathEngine={mathEngine}
                 />
               </div>
             )}
+
+            {/* Supported Math Formats Hint */}
+            <div className="mt-4 p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-[11px] text-slate-600 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="font-bold text-slate-700 flex items-center gap-1">
+                <Sigma className="w-3.5 h-3.5 text-indigo-600" />
+                Sintaks Matematika:
+              </span>
+              <span><b>LaTeX/KaTeX/MathJax:</b> <code className="bg-white border border-slate-200 px-1 rounded">$...$</code> / <code className="bg-white border border-slate-200 px-1 rounded">$$...$$</code></span>
+              <span><b>AsciiMath:</b> <code className="bg-white border border-slate-200 px-1 rounded">`...`</code></span>
+              <span><b>Typst:</b> <code className="bg-white border border-slate-200 px-1 rounded">[typst]...[/typst]</code></span>
+              <span><b>MathML:</b> <code className="bg-white border border-slate-200 px-1 rounded">&lt;math&gt;...&lt;/math&gt;</code></span>
+            </div>
 
             {/* Configuration */}
             <div className="mt-6 pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -610,7 +846,7 @@ export default function App() {
                 <Eye className="w-5 h-5 text-indigo-600" />
                 2. Hasil ({convertedQuestions.length} Soal)
               </h2>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {tableQuestionsCount > 0 && tableExportMode === 'image' && (
                   <button
                     onClick={handleDownloadAllTables}
@@ -624,6 +860,19 @@ export default function App() {
                       : `Unduh Tabel (${tableQuestionsCount})`}
                   </button>
                 )}
+                {mathQuestionsCount > 0 && mathExportMode === 'image' && (
+                  <button
+                    onClick={handleDownloadAllMath}
+                    disabled={isExportingMathImages}
+                    className="bg-violet-600 hover:bg-violet-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-2 px-3 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                    title="Unduh gambar PNG rumus matematika untuk ditaruh satu folder dengan Excel"
+                  >
+                    <Sigma className="w-3.5 h-3.5" />
+                    {isExportingMathImages
+                      ? 'Membuat...'
+                      : `Unduh Rumus (${mathQuestionsCount})`}
+                  </button>
+                )}
                 <button
                   onClick={exportToExcel}
                   disabled={convertedQuestions.length === 0 || isExporting}
@@ -634,6 +883,100 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {/* Math Engine & Export Controls when math exists */}
+            {convertedQuestions.length > 0 && mathQuestionsCount > 0 && (
+              <div className="mb-3 p-3 bg-violet-50/80 border border-violet-200 rounded-xl text-[11px] text-violet-950 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold flex items-center gap-1.5">
+                    <Sigma className="w-3.5 h-3.5 text-violet-600" />
+                    Sistem Matematika ({mathQuestionsCount} soal):
+                  </span>
+                  <div className="flex items-center gap-1 bg-white/80 p-0.5 rounded-lg border border-violet-200">
+                    <button
+                      type="button"
+                      onClick={() => setMathEngine('katex')}
+                      className={`px-2 py-0.5 rounded font-bold transition-all cursor-pointer ${
+                        mathEngine === 'katex'
+                          ? 'bg-violet-600 text-white'
+                          : 'text-violet-700 hover:bg-violet-100'
+                      }`}
+                    >
+                      KaTeX
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMathEngine('mathjax')}
+                      className={`px-2 py-0.5 rounded font-bold transition-all cursor-pointer ${
+                        mathEngine === 'mathjax'
+                          ? 'bg-violet-600 text-white'
+                          : 'text-violet-700 hover:bg-violet-100'
+                      }`}
+                    >
+                      MathJax
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <span className="block font-semibold text-violet-800 mb-1">
+                      Mode Ekspor Rumus ke Excel:
+                    </span>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(
+                        [
+                          { id: 'unicode', label: 'Unicode' },
+                          { id: 'image', label: 'PNG Image' },
+                          { id: 'raw', label: 'Kode Asli' },
+                        ] as { id: MathExportMode; label: string }[]
+                      ).map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setMathExportMode(opt.id)}
+                          className={`py-1 px-1.5 rounded-lg font-bold border transition-all cursor-pointer ${
+                            mathExportMode === opt.id
+                              ? 'bg-white border-violet-400 text-violet-800 shadow-2xs'
+                              : 'bg-violet-100/60 border-transparent text-violet-700/80 hover:bg-white/70'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="block font-semibold text-violet-800 mb-1">
+                      Sintaks <code className="bg-violet-100 px-1 rounded">$...$</code>:
+                    </span>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(
+                        [
+                          { id: 'auto', label: 'Auto' },
+                          { id: 'latex', label: 'LaTeX' },
+                          { id: 'typst', label: 'Typst' },
+                        ] as { id: DollarSyntaxMode; label: string }[]
+                      ).map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setDollarSyntax(opt.id)}
+                          className={`py-1 px-1.5 rounded-lg font-bold border transition-all cursor-pointer ${
+                            dollarSyntax === opt.id
+                              ? 'bg-white border-violet-400 text-violet-800 shadow-2xs'
+                              : 'bg-violet-100/60 border-transparent text-violet-700/80 hover:bg-white/70'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Table Export Options when tables exist */}
             {convertedQuestions.length > 0 && tableQuestionsCount > 0 && (
@@ -699,11 +1042,11 @@ export default function App() {
                     }`}
                   >
                     <Sparkles className="w-3 h-3 text-amber-500" />
-                    Berformat / Tabel ({formattedQuestionsCount})
+                    Berformat / Tabel / Rumus ({formattedQuestionsCount})
                   </button>
                 </div>
 
-                {tableQuestionsCount === 0 && (
+                {tableQuestionsCount === 0 && mathQuestionsCount === 0 && (
                   <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 leading-relaxed">
                     <b>Info Format iSpring:</b> Bold, Italic, & Underline sudah tersimpan di file Excel. Jika importer Excel iSpring QuizMaker Anda tetap menghapus format sel saat impor, klik <b>Salin Berformat</b> pada soal yang bertanda lalu tempel (<code className="bg-amber-100 px-1 rounded font-bold">Ctrl+V</code>) ke iSpring.
                   </div>
@@ -724,13 +1067,23 @@ export default function App() {
                     const hasCorrect = q.answers.some((a) => a.isCorrect);
                     const qHasFormat = questionHasRichFormatting(q);
                     const qTable = getFirstQuestionTable(q);
-                    const qFormatTags = getFormattingSummary(q.questionNodes);
+                    const qMathSegments = extractMathSegmentsFromQuestion(q, dollarSyntax);
+                    const qHasMath = qMathSegments.length > 0;
+                    const qFormatTags = [
+                      ...getFormattingSummary(q.questionNodes),
+                      ...(qHasMath || q.answers.some((a) => hasMathInRichText(a.richText, dollarSyntax))
+                        ? ['Rumus']
+                        : []),
+                    ];
                     const qCopyId = `q-${originalIndex}`;
+                    const qMmlCopyId = `mml-${originalIndex}`;
                     const effectiveImage =
                       q.image ||
                       (qTable && tableExportMode === 'image'
                         ? getTableImageFilename(originalIndex)
-                        : '');
+                        : qHasMath && mathExportMode === 'image'
+                          ? getMathImageFilename(originalIndex)
+                          : '');
 
                     return (
                       <div key={originalIndex} className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm relative">
@@ -746,7 +1099,7 @@ export default function App() {
                             )}
                           </div>
 
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             {qTable && (
                               <button
                                 type="button"
@@ -755,8 +1108,38 @@ export default function App() {
                                 title="Unduh tabel ini sebagai gambar PNG"
                               >
                                 <Download className="w-3 h-3" />
-                                PNG
+                                Tabel PNG
                               </button>
+                            )}
+                            {qHasMath && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownloadSingleMath(q, originalIndex)}
+                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-violet-200 bg-violet-50/70 text-violet-700 hover:bg-violet-100 flex items-center gap-1 transition-all cursor-pointer"
+                                  title="Unduh rumus soal ini sebagai gambar PNG"
+                                >
+                                  <Download className="w-3 h-3" />
+                                  Rumus PNG
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyQuestionMathML(qMmlCopyId, q, originalIndex)}
+                                  className={`text-[11px] font-semibold px-2 py-1 rounded-lg border flex items-center gap-1 transition-all cursor-pointer ${
+                                    copiedId === qMmlCopyId
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                      : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                                  }`}
+                                  title="Salin MathML untuk ditempel ke Word / Equation Editor"
+                                >
+                                  {copiedId === qMmlCopyId ? (
+                                    <Check className="w-3 h-3" />
+                                  ) : (
+                                    <Copy className="w-3 h-3" />
+                                  )}
+                                  MathML
+                                </button>
+                              </>
                             )}
                             <button
                               type="button"
@@ -801,6 +1184,8 @@ export default function App() {
                         <RichNodesRenderer
                           nodes={q.questionNodes}
                           prefixNumber={originalIndex + 1}
+                          mathEngine={mathEngine}
+                          dollarSyntax={dollarSyntax}
                         />
 
                         <div className="grid grid-cols-1 gap-2">
@@ -822,7 +1207,11 @@ export default function App() {
                                     {char}
                                   </span>
                                   <span className="leading-relaxed break-words">
-                                    <RichTextRenderer lines={ans.richText} />
+                                    <RichTextRenderer
+                                      lines={ans.richText}
+                                      mathEngine={mathEngine}
+                                      dollarSyntax={dollarSyntax}
+                                    />
                                   </span>
                                 </span>
 

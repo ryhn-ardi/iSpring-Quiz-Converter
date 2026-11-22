@@ -11,6 +11,15 @@ import {
   richTextToPlain,
 } from './richText';
 import { getTableImageFilename } from './tableImage';
+import {
+  DollarSyntaxMode,
+  MathExportMode,
+  replaceMathInRichTextWithUnicode,
+} from './mathEngine';
+import {
+  extractMathSegmentsFromQuestion,
+  getMathImageFilename,
+} from './mathImage';
 
 export type TableExportMode = 'image' | 'text';
 
@@ -41,8 +50,15 @@ function triggerBlobDownload(blob: Blob, filename: string) {
 
 export async function exportRichQuizToExcel(
   questions: RichQuestion[],
-  tableMode: TableExportMode = 'image'
-): Promise<{ filename: string; formattedCount: number; tableImageCount: number }> {
+  tableMode: TableExportMode = 'image',
+  mathMode: MathExportMode = 'unicode',
+  dollarSyntax: DollarSyntaxMode = 'auto'
+): Promise<{
+  filename: string;
+  formattedCount: number;
+  tableImageCount: number;
+  mathImageCount: number;
+}> {
   const headers = [
     'Question Type', 'Question Text', 'Image', 'Video', 'Audio',
     'Answer 1', 'Answer 2', 'Answer 3', 'Answer 4', 'Answer 5',
@@ -53,6 +69,7 @@ export async function exportRichQuizToExcel(
   const richTokenMap = new Map<string, RichText>();
   let tokenCounter = 0;
   let tableImageCount = 0;
+  let mathImageCount = 0;
 
   const toCellValue = (rich: RichText): string => {
     if (!hasRichFormatting(rich)) {
@@ -67,16 +84,28 @@ export async function exportRichQuizToExcel(
   questions.forEach((q, idx) => {
     const row = Array(18).fill('');
     const hasTable = questionHasTable(q);
+    const hasQuestionMath =
+      extractMathSegmentsFromQuestion(q, dollarSyntax).length > 0;
 
-    const questionTextRich =
+    let questionTextRich =
       hasTable && tableMode === 'image'
         ? richNodesToRichText(q.questionNodes, false)
         : q.questionRich;
+
+    if (mathMode !== 'raw') {
+      questionTextRich = replaceMathInRichTextWithUnicode(
+        questionTextRich,
+        dollarSyntax
+      );
+    }
 
     let imageFile = q.image || '';
     if (hasTable && tableMode === 'image' && !imageFile) {
       imageFile = getTableImageFilename(idx);
       tableImageCount++;
+    } else if (hasQuestionMath && mathMode === 'image' && !imageFile) {
+      imageFile = getMathImageFilename(idx);
+      mathImageCount++;
     }
 
     row[0] = q.type;
@@ -85,9 +114,13 @@ export async function exportRichQuizToExcel(
 
     q.answers.forEach((ans, optIdx) => {
       if (optIdx < 10) {
+        const processedAns =
+          mathMode !== 'raw'
+            ? replaceMathInRichTextWithUnicode(ans.richText, dollarSyntax)
+            : ans.richText;
         const cellRich = ans.isCorrect
-          ? prependPlainPrefixToRichText(ans.richText, '*')
-          : ans.richText;
+          ? prependPlainPrefixToRichText(processedAns, '*')
+          : processedAns;
         row[5 + optIdx] = toCellValue(cellRich);
       }
     });
@@ -127,7 +160,7 @@ export async function exportRichQuizToExcel(
 
   if (richTokenMap.size === 0) {
     XLSX.writeFile(wb, filename);
-    return { filename, formattedCount: 0, tableImageCount };
+    return { filename, formattedCount: 0, tableImageCount, mathImageCount };
   }
 
   const rawBuffer = XLSX.write(wb, {
@@ -204,5 +237,5 @@ export async function exportRichQuizToExcel(
 
   triggerBlobDownload(outBlob, filename);
 
-  return { filename, formattedCount: richTokenMap.size, tableImageCount };
+  return { filename, formattedCount: richTokenMap.size, tableImageCount, mathImageCount };
 }
