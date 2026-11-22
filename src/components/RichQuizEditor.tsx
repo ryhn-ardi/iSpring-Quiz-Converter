@@ -13,6 +13,7 @@ type RichQuizEditorProps = {
   onChangeHtml: (html: string) => void;
   placeholder?: string;
   onNotify?: (message: string, type: 'info' | 'success' | 'error') => void;
+  onDocxFileSelected?: (file: File) => void | Promise<void>;
 };
 
 export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
@@ -20,6 +21,7 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
   onChangeHtml,
   placeholder,
   onNotify,
+  onDocxFileSelected,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -138,6 +140,11 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
+
+    if (onDocxFileSelected) {
+      await onDocxFileSelected(file);
+      return;
+    }
 
     try {
       const arrayBuffer = await file.arrayBuffer();

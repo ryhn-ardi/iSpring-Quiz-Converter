@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
-  AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles, Table as TableIcon
+  AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles, Table as TableIcon,
+  FileText, FileUp
 } from 'lucide-react';
 import { RichQuizEditor } from './components/RichQuizEditor';
 import {
@@ -22,6 +23,8 @@ import {
   getFormattingSummary,
   hasRichFormatting,
   htmlToRichNodes,
+  richNodesToEditorHtml,
+  richNodesToPlain,
 } from './utils/richText';
 import { TableExportMode, exportRichQuizToExcel } from './utils/excelExport';
 import {
@@ -29,6 +32,10 @@ import {
   downloadQuestionTablePng,
   getTableImageFilename,
 } from './utils/tableImage';
+import {
+  downloadSampleWordTemplate,
+  parseDocxFile,
+} from './utils/docxImport';
 
 type ToastState = { message: string; type: 'info' | 'success' | 'error'; visible: boolean };
 
@@ -170,6 +177,7 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingImages, setIsExportingImages] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
+  const headerDocxInputRef = useRef<HTMLInputElement>(null);
 
   const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ message, type, visible: true });
@@ -220,6 +228,91 @@ export default function App() {
       }
     } catch (err: any) {
       showToast(err.message || 'Terjadi kesalahan sistem', 'error');
+    }
+  };
+
+  const handleImportDocx = async (file: File) => {
+    try {
+      const parsed = await parseDocxFile(file);
+      const qHtml = richNodesToEditorHtml(parsed.questionNodes);
+
+      if (parsed.hasKeysSection && parsed.keysText.trim()) {
+        setMode('auto');
+        setAutoQuestionsHtml(qHtml);
+        setAutoKeys(parsed.keysText);
+        setPreviewFilter('all');
+
+        try {
+          const converted = convertAutoRich(
+            parsed.questionNodes,
+            parsed.keysText,
+            defaultPoints
+          );
+          setConvertedQuestions(converted);
+          showToast(
+            `Berhasil mengekstrak ${converted.length} soal & kunci jawaban dari "${file.name}"${
+              parsed.tableCount > 0 ? ` (${parsed.tableCount} tabel terjaga)` : ''
+            }!`,
+            'success'
+          );
+        } catch (convErr: any) {
+          setConvertedQuestions([]);
+          showToast(
+            `Soal & kunci diekstrak dari "${file.name}", namun perlu dicek: ${
+              convErr?.message || ''
+            }`,
+            'info'
+          );
+        }
+        return;
+      }
+
+      if (mode === 'rule') {
+        setRuleHtml(qHtml);
+        const plain = richNodesToPlain(parsed.questionNodes, false);
+        if (/(?:^|\n)\s*(?:\*|\[x\])/im.test(plain)) {
+          try {
+            const converted = convertRuleRich(parsed.questionNodes, defaultPoints);
+            setConvertedQuestions(converted);
+            showToast(
+              `Berhasil mengimpor & mengonversi ${converted.length} soal dari "${file.name}".`,
+              'success'
+            );
+            return;
+          } catch {
+            // Fall back to regular load notice below
+          }
+        }
+        showToast(
+          `Soal dari "${file.name}" dimuat (tidak ditemukan bagian "Kunci Jawaban").`,
+          'info'
+        );
+      } else {
+        setAutoQuestionsHtml(qHtml);
+        showToast(
+          parsed.hasKeysSection
+            ? `Soal dari "${file.name}" dimuat, tetapi isi "Kunci Jawaban" kosong.`
+            : `Soal dari "${file.name}" dimuat! Tambahkan heading "Kunci Jawaban" di Word atau isi kolom Kunci Jawaban di kanan.`,
+          'info'
+        );
+      }
+    } catch (err: any) {
+      showToast(
+        'Gagal membaca file .docx: ' + (err?.message || 'Format file tidak valid'),
+        'error'
+      );
+    }
+  };
+
+  const handleDownloadTemplateDocx = async () => {
+    try {
+      const filename = await downloadSampleWordTemplate();
+      showToast(
+        `Contoh template "${filename}" diunduh! Gunakan bagian "Soal" & "Kunci Jawaban" di Word lalu impor kembali.`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast('Gagal membuat template Word: ' + (err?.message || ''), 'error');
     }
   };
 
@@ -358,10 +451,43 @@ export default function App() {
         {/* Left Column: Input Form (7 cols) */}
         <div className="lg:col-span-7 flex flex-col gap-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-            <h2 className="text-lg font-bold text-slate-900 mb-4 flex items-center gap-2">
-              <Edit3 className="w-5 h-5 text-indigo-600" />
-              1. Input Teks Soal & Kunci Jawaban
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Edit3 className="w-5 h-5 text-indigo-600" />
+                1. Input Teks Soal & Kunci Jawaban
+              </h2>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={headerDocxInputRef}
+                  type="file"
+                  accept=".docx"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (file) handleImportDocx(file);
+                  }}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={handleDownloadTemplateDocx}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Unduh contoh dokumen Word (.docx) dengan format Soal & Kunci Jawaban"
+                >
+                  <FileText className="w-3.5 h-3.5 text-slate-500" />
+                  Contoh Template .docx
+                </button>
+                <button
+                  type="button"
+                  onClick={() => headerDocxInputRef.current?.click()}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Impor file Word (.docx) yang berisi bagian Soal dan Kunci Jawaban sekaligus"
+                >
+                  <FileUp className="w-3.5 h-3.5" />
+                  Impor Template Word (.docx)
+                </button>
+              </div>
+            </div>
 
             {/* Mode Selector Tab */}
             <div className="flex bg-slate-100 p-1 rounded-xl mb-4 gap-1 sm:gap-0">
@@ -385,11 +511,11 @@ export default function App() {
             {mode === 'auto' && (
               <div className="space-y-4">
                 <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl text-xs text-indigo-700">
-                  <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis (Mendukung Bold / Italic / Underline / Tabel):</p>
+                  <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis & Impor Template Word (.docx):</p>
                   <ul className="list-disc pl-4 space-y-1">
-                    <li>Tempelkan soal langsung dari <b>Word / Google Docs</b> atau gunakan tombol <b>Impor Word (.docx)</b> — format <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, dan <b>Tabel</b> otomatis dipertahankan.</li>
-                    <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> untuk ganda).</li>
-                    <li>Aplikasi otomatis mendeteksi soal sebagai <b>MC</b> atau <b>MR (Multiple Response)</b>.</li>
+                    <li>Di file Word (<b>.docx</b>), beri penanda baris <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">Soal</code> di atas daftar soal dan <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">Kunci Jawaban</code> sebelum daftar kunci — saat diimpor, keduanya otomatis diekstrak & dikonversi sekaligus!</li>
+                    <li>Format <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, dan <b>Tabel</b> (termasuk tabel kunci jawaban) otomatis terbaca & dipertahankan.</li>
+                    <li>Bisa juga tempel manual dari Word / Google Docs, lalu isi kunci (contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> atau <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> untuk <b>MR</b>).</li>
                   </ul>
                 </div>
 
@@ -401,6 +527,7 @@ export default function App() {
                       onChangeHtml={setAutoQuestionsHtml}
                       placeholder={'1. Pertanyaan contoh?\na. Opsi A\nb. Opsi B'}
                       onNotify={showToast}
+                      onDocxFileSelected={handleImportDocx}
                     />
                   </div>
                   <div className="md:col-span-1 flex flex-col">
@@ -425,7 +552,7 @@ export default function App() {
                   <ul className="list-disc pl-4 space-y-1">
                     <li>Pisahkan antarsoal dengan 1 baris kosong (Double Enter).</li>
                     <li>Tandai kunci jawaban dengan tanda bintang (<span className="text-red-500 font-bold">*</span>) di awal teks pilihan (Contoh: <i>*d. Era Klasik</i>).</li>
-                    <li>Tempel dari Word/Docs atau impor file <code className="bg-slate-200/70 px-1 rounded">.docx</code> untuk mempertahankan format <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, dan <b>Tabel</b>.</li>
+                    <li>Jika file <code className="bg-slate-200/70 px-1 rounded">.docx</code> Anda memiliki bagian <b>Kunci Jawaban</b>, web akan otomatis mengekstrak ke Mode Otomatis.</li>
                   </ul>
                 </div>
                 <RichQuizEditor
@@ -433,6 +560,7 @@ export default function App() {
                   onChangeHtml={setRuleHtml}
                   placeholder="Tuliskan atau tempel soal dengan tanda bintang di sini..."
                   onNotify={showToast}
+                  onDocxFileSelected={handleImportDocx}
                 />
               </div>
             )}
