@@ -1,302 +1,198 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
-  AlertTriangle, Info, Image as ImageIcon
+  AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
+import { RichQuizEditor } from './components/RichQuizEditor';
+import {
+  RichQuestion,
+  convertAutoRich,
+  convertRuleRich,
+  questionHasRichFormatting,
+} from './utils/quizParser';
+import {
+  RichText,
+  copyRichTextToClipboard,
+  getFormattingSummary,
+  hasRichFormatting,
+  htmlToRichLines,
+} from './utils/richText';
+import { exportRichQuizToExcel } from './utils/excelExport';
 
-// Types
-type Answer = { text: string; isCorrect: boolean };
-type Question = { type: 'MC' | 'MR'; question: string; answers: Answer[]; points: number; image?: string };
 type ToastState = { message: string; type: 'info' | 'success' | 'error'; visible: boolean };
 
-// Initial Sample Data
-const SAMPLE_AUTO_QUESTIONS = `1. Era musik yang mengutamakan kerapian, struktur simetri (tanya-jawab), dan keseimbangan adalah...
-a. Era Barok
-b. Era Romantik
-c. Era Modern
-d. Era Klasik
-
-2. Siapakah komponis musik terkenal pada era Klasik yang menciptakan lagu "Für Elise"?
-a. Johann Sebastian Bach
-b. Ludwig van Beethoven
-c. Wolfgang Amadeus Mozart
-d. Franz Schubert
-
-3. Unsur paling mendasar dalam musik yang merupakan getaran udara teratur yang memiliki tinggi rendah tertentu dan dapat didengar adalah...
-a. Bunyi
-b. Nada
-c. Irama
-d. Melodi`;
+// Initial Sample Data (preserving rich formatting examples)
+const SAMPLE_AUTO_QUESTIONS_HTML = [
+  '<div>1. Era musik yang mengutamakan <b>kerapian</b>, struktur simetri (tanya-jawab), dan <u>keseimbangan</u> adalah...</div>',
+  '<div>a. Era Barok</div>',
+  '<div>b. Era Romantik</div>',
+  '<div>c. Era Modern</div>',
+  '<div>d. Era Klasik</div>',
+  '<div><br></div>',
+  '<div>2. Siapakah komponis musik terkenal pada era Klasik yang menciptakan lagu <i>"Für Elise"</i>?</div>',
+  '<div>a. Johann Sebastian Bach</div>',
+  '<div>b. Ludwig van Beethoven</div>',
+  '<div>c. Wolfgang Amadeus Mozart</div>',
+  '<div>d. Franz Schubert</div>',
+  '<div><br></div>',
+  '<div>3. Unsur <b>paling mendasar</b> dalam musik yang merupakan getaran udara teratur yang memiliki tinggi rendah tertentu dan dapat didengar adalah...</div>',
+  '<div>a. Bunyi</div>',
+  '<div>b. Nada</div>',
+  '<div>c. Irama</div>',
+  '<div>d. Melodi</div>',
+].join('');
 
 const SAMPLE_AUTO_KEYS = `1. d
 2. b
 3. b`;
 
-const SAMPLE_RULE = `Era musik yang mengutamakan kerapian, struktur simetri (tanya-jawab), dan keseimbangan adalah...
-a. Era Barok
-b. Era Romantik
-c. Era Modern
-*d. Era Klasik
+const SAMPLE_RULE_HTML = [
+  '<div>Era musik yang mengutamakan <b>kerapian</b>, struktur simetri (tanya-jawab), dan <u>keseimbangan</u> adalah...</div>',
+  '<div>a. Era Barok</div>',
+  '<div>b. Era Romantik</div>',
+  '<div>c. Era Modern</div>',
+  '<div>*d. Era Klasik</div>',
+  '<div><br></div>',
+  '<div>Siapakah komponis musik terkenal pada era Klasik yang menciptakan lagu <i>"Für Elise"</i>?</div>',
+  '<div>a. Johann Sebastian Bach</div>',
+  '<div>*b. Ludwig van Beethoven</div>',
+  '<div>c. Wolfgang Amadeus Mozart</div>',
+  '<div>d. Franz Schubert</div>',
+].join('');
 
-Siapakah komponis musik terkenal pada era Klasik yang menciptakan lagu "Für Elise"?
-a. Johann Sebastian Bach
-*b. Ludwig van Beethoven
-c. Wolfgang Amadeus Mozart
-d. Franz Schubert`;
+function RichTextRenderer({ lines }: { lines: RichText }) {
+  return (
+    <>
+      {lines.map((line, lineIdx) => (
+        <React.Fragment key={lineIdx}>
+          {lineIdx > 0 && <br />}
+          {line.map((span, spanIdx) => {
+            const classes = [
+              span.bold ? 'font-bold' : '',
+              span.italic ? 'italic' : '',
+              span.underline ? 'underline decoration-1 underline-offset-2' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
+            return classes ? (
+              <span key={spanIdx} className={classes}>
+                {span.text}
+              </span>
+            ) : (
+              <React.Fragment key={spanIdx}>{span.text}</React.Fragment>
+            );
+          })}
+        </React.Fragment>
+      ))}
+    </>
+  );
+}
 
 export default function App() {
   const [mode, setMode] = useState<'auto' | 'rule'>('auto');
-  const [autoQuestions, setAutoQuestions] = useState(SAMPLE_AUTO_QUESTIONS);
+  const [autoQuestionsHtml, setAutoQuestionsHtml] = useState(SAMPLE_AUTO_QUESTIONS_HTML);
   const [autoKeys, setAutoKeys] = useState(SAMPLE_AUTO_KEYS);
-  const [ruleText, setRuleText] = useState(SAMPLE_RULE);
+  const [ruleHtml, setRuleHtml] = useState(SAMPLE_RULE_HTML);
   const [defaultPoints, setDefaultPoints] = useState<number>(10);
-  const [convertedQuestions, setConvertedQuestions] = useState<Question[]>([]);
+  const [convertedQuestions, setConvertedQuestions] = useState<RichQuestion[]>([]);
+  const [previewFilter, setPreviewFilter] = useState<'all' | 'formatted'>('all');
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
 
   const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ message, type, visible: true });
     setTimeout(() => {
-      setToast(prev => ({ ...prev, visible: false }));
+      setToast((prev) => ({ ...prev, visible: false }));
     }, 4000);
   };
 
   const clearInput = () => {
-    setAutoQuestions('');
+    setAutoQuestionsHtml('');
     setAutoKeys('');
-    setRuleText('');
+    setRuleHtml('');
     setConvertedQuestions([]);
+    setPreviewFilter('all');
     showToast('Semua input dibersihkan.', 'info');
   };
 
-  const parseBlocks = (text: string) => {
-    let parsedBlocks: { qLines: string[], aLines: string[] }[] = [];
-    let currentQLines: string[] = [];
-    let currentALines: string[] = [];
-    
-    const linesArr = text.split('\n').map(l => l.trim()).filter(Boolean);
-    
-    const isOption = (line: string) => {
-        return /^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]\s*/i.test(line) || 
-               /^(?:\*|\[x\]\s*)?[a-eA-E]\s+/i.test(line);
-    };
-
-    const isNumbering = (line: string) => {
-        return /^\d+[\.\)\-]\s*/.test(line) || /^\d+\s+/.test(line) || /^soal\s+\d+/i.test(line);
-    };
-
-    linesArr.forEach(line => {
-        if (isOption(line)) {
-            currentALines.push(line);
-        } else {
-            if (currentALines.length > 0) {
-                if (isNumbering(line)) {
-                    parsedBlocks.push({ qLines: currentQLines, aLines: currentALines });
-                    currentQLines = [line];
-                    currentALines = [];
-                } else {
-                    currentALines[currentALines.length - 1] += '\n' + line;
-                }
-            } else {
-                currentQLines.push(line);
-            }
-        }
-    });
-
-    if (currentQLines.length > 0 || currentALines.length > 0) {
-        parsedBlocks.push({ qLines: currentQLines, aLines: currentALines });
-    }
-    return parsedBlocks;
-  };
-
-  const konversiOtomatisTerpisah = () => {
-    const qText = autoQuestions.trim();
-    const kText = autoKeys.trim();
-    
-    if (!qText || !kText) {
-      showToast('Kolom soal dan kolom kunci jawaban wajib diisi keduanya!', 'error');
-      return;
-    }
-
+  const prosesKonversi = () => {
     try {
-      const keysMap = new Map<number, string[]>();
-      const lines = kText.split('\n');
-      
-      lines.forEach(line => {
-        const cleanLine = line.trim().toLowerCase();
-        const numMatch = cleanLine.match(/^(\d+)[\s\.\-\=\:]+(.*)/);
-        if (numMatch) {
-          const qNum = parseInt(numMatch[1], 10);
-          const letters = Array.from(numMatch[2].matchAll(/\b([a-j])\b/g)).map(m => m[1]);
-          if (letters.length > 0) {
-            keysMap.set(qNum, Array.from(new Set(letters)));
-          }
-        }
-      });
-
-      if (keysMap.size === 0) {
-        lines.forEach((line, idx) => {
-          const cleanLine = line.trim().toLowerCase();
-          const letters = Array.from(cleanLine.matchAll(/\b([a-j])\b/g)).map(m => m[1]);
-          if (letters.length > 0) {
-            keysMap.set(idx + 1, Array.from(new Set(letters)));
-          }
-        });
+      if (mode === 'auto') {
+        const lines = htmlToRichLines(autoQuestionsHtml);
+        const converted = convertAutoRich(lines, autoKeys, defaultPoints);
+        setConvertedQuestions(converted);
+        setPreviewFilter('all');
+        const fmtCount = converted.filter(questionHasRichFormatting).length;
+        showToast(
+          fmtCount > 0
+            ? `Selesai! ${converted.length} soal dikonversi (${fmtCount} soal memiliki format Bold/Italic/Underline).`
+            : `Selesai! Berhasil menjodohkan ${converted.length} soal dengan kunci jawaban secara instan.`,
+          'success'
+        );
+      } else {
+        const lines = htmlToRichLines(ruleHtml);
+        const converted = convertRuleRich(lines, defaultPoints);
+        setConvertedQuestions(converted);
+        setPreviewFilter('all');
+        const fmtCount = converted.filter(questionHasRichFormatting).length;
+        showToast(
+          fmtCount > 0
+            ? `Berhasil mengonversi ${converted.length} soal (${fmtCount} soal memiliki format Bold/Italic/Underline).`
+            : `Berhasil mengonversi ${converted.length} soal secara lokal.`,
+          'success'
+        );
       }
-
-      const parsedBlocks = parseBlocks(qText);
-      const converted: Question[] = [];
-
-      parsedBlocks.forEach((block, blockIdx) => {
-        let rawTitle = block.qLines.join('\n').trim();
-        if(!rawTitle && block.aLines.length > 0) {
-            rawTitle = block.aLines.shift() || '';
-        }
-        if (!rawTitle) return;
-
-        const numMatch = rawTitle.match(/^(\d+)[\.\)\s-]+/);
-        const qNum = numMatch ? parseInt(numMatch[1], 10) : (blockIdx + 1);
-
-        const targetKeys = keysMap.get(qNum) || [];
-        let cleanQuestionText = rawTitle.replace(/^\d+[\.\)\s-]+\s*/, '');
-        
-        let image = '';
-        const imgMatch = cleanQuestionText.match(/\[Gambar(?:[:\s]*(.*?))?\]/i);
-        if (imgMatch) {
-            image = `gambar_soal_${qNum}.jpg`;
-            cleanQuestionText = cleanQuestionText.replace(/\[Gambar(?:[:\s]*(.*?))?\]/i, '').trim();
-        }
-
-        const answers: Answer[] = [];
-        block.aLines.forEach(line => {
-           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s*/i, '').trim();
-           const letterMatch = line.match(/^(?:\*|\[x\]\s*)?([a-eA-E])/i);
-           const letter = letterMatch ? letterMatch[1].toLowerCase() : '';
-           let isCorrect = targetKeys.includes(letter);
-           
-           answers.push({ text: cleanOpt, isCorrect });
-        });
-
-        const isMR = answers.filter(a => a.isCorrect).length > 1;
-
-        converted.push({
-          type: isMR ? 'MR' : 'MC',
-          question: cleanQuestionText,
-          answers,
-          points: defaultPoints,
-          image
-        });
-      });
-
-      if (converted.length === 0) {
-        throw new Error("Gagal mendeteksi struktur soal. Pastikan ada baris kosong di antara soal.");
-      }
-
-      setConvertedQuestions(converted);
-      showToast(`Selesai! Berhasil menjodohkan ${converted.length} soal dengan kunci jawaban secara instan.`, 'success');
-
     } catch (err: any) {
       showToast(err.message || 'Terjadi kesalahan sistem', 'error');
     }
   };
 
-  const konversiAturanLokal = () => {
-    const text = ruleText.trim();
-    if (!text) {
-      showToast('Masukkan teks soal manual terlebih dahulu!', 'error');
-      return;
-    }
-
+  const exportToExcel = async () => {
+    if (convertedQuestions.length === 0 || isExporting) return;
+    setIsExporting(true);
     try {
-      const parsedBlocks = parseBlocks(text);
-      const converted: Question[] = [];
-
-      parsedBlocks.forEach((block, blockIdx) => {
-        let rawTitle = block.qLines.join('\n').trim();
-        if(!rawTitle && block.aLines.length > 0) {
-            rawTitle = block.aLines.shift() || '';
-        }
-        if (!rawTitle) return;
-
-        const numMatch = rawTitle.match(/^(\d+)[\.\)\s-]+/);
-        const qNum = numMatch ? parseInt(numMatch[1], 10) : (blockIdx + 1);
-
-        let cleanQuestionText = rawTitle.replace(/^\d+[\.\)\s-]+\s*/, '');
-        
-        let image = '';
-        const imgMatch = cleanQuestionText.match(/\[Gambar(?:[:\s]*(.*?))?\]/i);
-        if (imgMatch) {
-            image = `gambar_soal_${qNum}.jpg`;
-            cleanQuestionText = cleanQuestionText.replace(/\[Gambar(?:[:\s]*(.*?))?\]/i, '').trim();
-        }
-
-        const answers: Answer[] = [];
-        block.aLines.forEach(line => {
-           const isCorrect = line.startsWith('*') || line.toLowerCase().startsWith('[x]');
-           let cleanOpt = line.replace(/^(?:\*|\[x\]\s*)?[a-eA-E][\.\)\-]?\s*/i, '').trim();
-           answers.push({ text: cleanOpt, isCorrect });
-        });
-
-        const isMR = answers.filter(a => a.isCorrect).length > 1;
-
-        converted.push({
-          type: isMR ? 'MR' : 'MC',
-          question: cleanQuestionText,
-          answers,
-          points: defaultPoints,
-          image
-        });
-      });
-
-      setConvertedQuestions(converted);
-      showToast(`Berhasil mengonversi ${converted.length} soal secara lokal.`, 'success');
+      const { filename, formattedCount } = await exportRichQuizToExcel(convertedQuestions);
+      showToast(
+        formattedCount > 0
+          ? `Excel "${filename}" diunduh dengan ${formattedCount} sel berformat Bold/Italic/Underline!`
+          : `Excel "${filename}" diunduh! Siap diimpor ke iSpring QuizMaker.`,
+        'success'
+      );
     } catch (err: any) {
-      showToast('Gagal memproses susunan soal: ' + (err.message || ''), 'error');
+      showToast('Gagal mengekspor Excel: ' + (err?.message || 'Unknown error'), 'error');
+    } finally {
+      setIsExporting(false);
     }
   };
 
-  const prosesKonversi = () => {
-    if (mode === 'auto') konversiOtomatisTerpisah();
-    else konversiAturanLokal();
+  const handleCopyRich = async (id: string, lines: RichText, label: string) => {
+    const richCopied = await copyRichTextToClipboard(lines);
+    setCopiedId(id);
+    setTimeout(() => {
+      setCopiedId((prev) => (prev === id ? null : prev));
+    }, 2000);
+    showToast(
+      richCopied
+        ? `${label} disalin dengan format Bold/Italic/Underline! Tempel (Ctrl+V) langsung ke iSpring.`
+        : `${label} disalin ke clipboard.`,
+      'success'
+    );
   };
 
-  const exportToExcel = () => {
-    if (convertedQuestions.length === 0) return;
+  const formattedQuestionsCount = useMemo(
+    () => convertedQuestions.filter(questionHasRichFormatting).length,
+    [convertedQuestions]
+  );
 
-    const headers = [
-      'Question Type', 'Question Text', 'Image', 'Video', 'Audio',
-      'Answer 1', 'Answer 2', 'Answer 3', 'Answer 4', 'Answer 5',
-      'Answer 6', 'Answer 7', 'Answer 8', 'Answer 9', 'Answer 10',
-      'Correct Feedback', 'Incorrect Feedback', 'Points'
-    ];
-
-    const rows: string[][] = [];
-    convertedQuestions.forEach((q, idx) => {
-      const row = Array(18).fill('');
-      row[0] = q.type;
-      row[1] = q.question;
-      row[2] = q.image || '';
-      
-      q.answers.forEach((ans, optIdx) => {
-        if (optIdx < 10) {
-          row[5 + optIdx] = ans.isCorrect ? `*${ans.text}` : ans.text;
-        }
-      });
-
-      row[17] = q.points.toString();
-      rows.push(row);
-    });
-
-    const wb = XLSX.utils.book_new();
-    const wsData = [headers, ...rows];
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-    XLSX.utils.book_append_sheet(wb, ws, "Template");
-
-    const filename = `iSpring_Import_Quiz_${Date.now().toString().slice(-5)}.xlsx`;
-    XLSX.writeFile(wb, filename);
-    showToast(`Excel "${filename}" diunduh! Siap diimpor ke iSpring QuizMaker.`, 'success');
-  };
+  const displayedQuestions = useMemo(() => {
+    return convertedQuestions
+      .map((q, idx) => ({ q, originalIndex: idx }))
+      .filter(({ q }) =>
+        previewFilter === 'formatted' ? questionHasRichFormatting(q) : true
+      );
+  }, [convertedQuestions, previewFilter]);
 
   return (
     <div className="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans">
@@ -321,7 +217,7 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-grow max-w-7xl w-full mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        
+
         {/* Left Column: Input Form (7 cols) */}
         <div className="lg:col-span-7 flex flex-col gap-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
@@ -332,16 +228,16 @@ export default function App() {
 
             {/* Mode Selector Tab */}
             <div className="flex bg-slate-100 p-1 rounded-xl mb-4 gap-1 sm:gap-0">
-              <button 
-                onClick={() => setMode('auto')} 
-                className={`flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all flex items-center justify-center gap-1.5 ${mode === 'auto' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+              <button
+                onClick={() => setMode('auto')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${mode === 'auto' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
               >
                 <Zap className={`w-4 h-4 ${mode === 'auto' ? 'text-amber-500' : ''}`} />
                 Otomatis (Soal + Kunci Terpisah)
               </button>
-              <button 
-                onClick={() => setMode('rule')} 
-                className={`flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all flex items-center justify-center gap-1.5 ${mode === 'rule' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+              <button
+                onClick={() => setMode('rule')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${mode === 'rule' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
               >
                 <Sliders className="w-4 h-4" />
                 Manual (Tanda Bintang *)
@@ -352,33 +248,32 @@ export default function App() {
             {mode === 'auto' && (
               <div className="space-y-4">
                 <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl text-xs text-indigo-700">
-                  <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis:</p>
+                  <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis (Mendukung Bold / Italic / Underline):</p>
                   <ul className="list-disc pl-4 space-y-1">
-                    <li>Tempelkan daftar soal polos Anda pada kolom <b>Daftar Soal Polos</b> di bawah.</li>
-                    <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> atau <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A dan B</code> untuk ganda).</li>
-                    <li>Aplikasi akan otomatis mencari opsi yang sesuai dengan kunci. Soal akan otomatis terdeteksi sebagai <b>MC</b> atau <b>MR (Multiple Response)</b>.</li>
+                    <li>Tempelkan soal langsung dari <b>Word / Google Docs</b> atau gunakan tombol <b>Impor Word (.docx)</b> — format <b>Bold</b>, <i>Italic</i>, dan <u>Underline</u> otomatis dipertahankan.</li>
+                    <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> untuk ganda).</li>
+                    <li>Aplikasi otomatis mendeteksi soal sebagai <b>MC</b> atau <b>MR (Multiple Response)</b>.</li>
                   </ul>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="md:col-span-2">
-                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Daftar Soal Polos:</label>
-                    <textarea 
-                      value={autoQuestions}
-                      onChange={(e) => setAutoQuestions(e.target.value)}
-                      rows={10} 
-                      className="w-full p-4 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-mono leading-relaxed resize-none" 
-                      placeholder={"1. Pertanyaan contoh?\na. Opsi A\nb. Opsi B"}
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Daftar Soal (Rich Text):</label>
+                    <RichQuizEditor
+                      valueHtml={autoQuestionsHtml}
+                      onChangeHtml={setAutoQuestionsHtml}
+                      placeholder={'1. Pertanyaan contoh?\na. Opsi A\nb. Opsi B'}
+                      onNotify={showToast}
                     />
                   </div>
-                  <div className="md:col-span-1">
+                  <div className="md:col-span-1 flex flex-col">
                     <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Kunci Jawaban:</label>
-                    <textarea 
+                    <textarea
                       value={autoKeys}
                       onChange={(e) => setAutoKeys(e.target.value)}
-                      rows={10} 
-                      className="w-full p-4 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-mono leading-relaxed resize-none" 
-                      placeholder={"1. D\n2. B\n3. B"}
+                      rows={12}
+                      className="w-full flex-grow p-4 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-mono leading-relaxed resize-none"
+                      placeholder={'1. D\n2. B\n3. B'}
                     />
                   </div>
                 </div>
@@ -389,19 +284,18 @@ export default function App() {
             {mode === 'rule' && (
               <div className="space-y-4">
                 <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl text-xs text-slate-600">
-                  <p className="font-bold mb-1 text-slate-700">Aturan Penulisan Manual:</p>
+                  <p className="font-bold mb-1 text-slate-700">Aturan Penulisan Manual (Mendukung Bold / Italic / Underline):</p>
                   <ul className="list-disc pl-4 space-y-1">
                     <li>Pisahkan antarsoal dengan 1 baris kosong (Double Enter).</li>
-                    <li>Tandai kunci jawaban dengan tanda bintang (<span className="text-red-500 font-bold">*</span>) di awal teks pilihan.</li>
-                    <li><i>Contoh: *d. Era Klasik</i></li>
+                    <li>Tandai kunci jawaban dengan tanda bintang (<span className="text-red-500 font-bold">*</span>) di awal teks pilihan (Contoh: <i>*d. Era Klasik</i>).</li>
+                    <li>Tempel dari Word/Docs atau impor file <code className="bg-slate-200/70 px-1 rounded">.docx</code> untuk mempertahankan format <b>Bold</b>, <i>Italic</i>, dan <u>Underline</u>.</li>
                   </ul>
                 </div>
-                <textarea 
-                  value={ruleText}
-                  onChange={(e) => setRuleText(e.target.value)}
-                  rows={10} 
-                  className="w-full p-4 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-mono leading-relaxed resize-none" 
-                  placeholder="Tuliskan soal dengan tanda bintang di sini..."
+                <RichQuizEditor
+                  valueHtml={ruleHtml}
+                  onChangeHtml={setRuleHtml}
+                  placeholder="Tuliskan atau tempel soal dengan tanda bintang di sini..."
+                  onNotify={showToast}
                 />
               </div>
             )}
@@ -416,11 +310,12 @@ export default function App() {
                 <p className="text-[11px] text-slate-400 mt-0.5">Bobot nilai default yang diberikan untuk setiap jawaban benar.</p>
               </div>
               <div className="relative">
-                <input 
-                  type="number" 
+                <input
+                  type="number"
                   value={defaultPoints}
-                  onChange={(e) => setDefaultPoints(parseInt(e.target.value) || 0)}
-                  min="0" max="1000" 
+                  onChange={(e) => setDefaultPoints(parseInt(e.target.value, 10) || 0)}
+                  min="0"
+                  max="1000"
                   className="w-28 pl-4 pr-10 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-slate-800 text-center"
                 />
                 <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 pointer-events-none">Poin</span>
@@ -429,7 +324,7 @@ export default function App() {
 
             {/* Action Buttons */}
             <div className="flex gap-4 mt-6">
-              <button onClick={clearInput} className="px-5 py-3 border border-slate-200 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2 transition-all">
+              <button onClick={clearInput} className="px-5 py-3 border border-slate-200 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50 flex items-center gap-2 transition-all cursor-pointer">
                 <Trash2 className="w-4 h-4" />
                 Bersihkan
               </button>
@@ -445,20 +340,53 @@ export default function App() {
         {/* Right Column: Live Preview & Excel Download (5 cols) */}
         <div className="lg:col-span-5 flex flex-col gap-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col h-full">
-            <div className="flex justify-between items-center mb-4">
+            <div className="flex justify-between items-center mb-3 gap-2">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Eye className="w-5 h-5 text-indigo-600" />
                 2. Hasil ({convertedQuestions.length} Soal)
               </h2>
-              <button 
-                onClick={exportToExcel} 
-                disabled={convertedQuestions.length === 0} 
-                className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-500/10"
+              <button
+                onClick={exportToExcel}
+                disabled={convertedQuestions.length === 0 || isExporting}
+                className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-500/10 cursor-pointer"
               >
                 <Download className="w-4 h-4" />
-                Unduh Excel
+                {isExporting ? 'Mengekspor...' : 'Unduh Excel'}
               </button>
             </div>
+
+            {/* Filter & Rich Text Note for iSpring */}
+            {convertedQuestions.length > 0 && formattedQuestionsCount > 0 && (
+              <div className="mb-3 space-y-2.5">
+                <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
+                  <button
+                    onClick={() => setPreviewFilter('all')}
+                    className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                      previewFilter === 'all'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Semua Soal ({convertedQuestions.length})
+                  </button>
+                  <button
+                    onClick={() => setPreviewFilter('formatted')}
+                    className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                      previewFilter === 'formatted'
+                        ? 'bg-white text-indigo-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Sparkles className="w-3 h-3 text-amber-500" />
+                    Berformat B/I/U ({formattedQuestionsCount})
+                  </button>
+                </div>
+
+                <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 leading-relaxed">
+                  <b>Info Format iSpring:</b> Bold, Italic, & Underline sudah tersimpan di file Excel. Jika importer Excel iSpring QuizMaker Anda tetap menghapus format sel saat impor, klik <b>Salin Berformat</b> pada soal yang bertanda lalu tempel (<code className="bg-amber-100 px-1 rounded font-bold">Ctrl+V</code>) ke iSpring.
+                </div>
+              </div>
+            )}
 
             <div className="flex-grow border border-slate-100 bg-slate-50/50 rounded-xl p-4 overflow-y-auto max-h-[600px]">
               {convertedQuestions.length === 0 ? (
@@ -469,37 +397,121 @@ export default function App() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {convertedQuestions.map((q, idx) => {
-                    let hasCorrect = false;
+                  {displayedQuestions.map(({ q, originalIndex }) => {
+                    const hasCorrect = q.answers.some((a) => a.isCorrect);
+                    const qHasFormat = hasRichFormatting(q.questionRich);
+                    const qFormatTags = getFormattingSummary(q.questionRich);
+                    const qCopyId = `q-${originalIndex}`;
+
                     return (
-                      <div key={idx} className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm relative">
-                        <div className="absolute right-4 top-4 bg-indigo-50 text-indigo-700 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                          SOAL {idx + 1} ({q.type})
+                      <div key={originalIndex} className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm relative">
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="bg-indigo-50 text-indigo-700 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                              SOAL {originalIndex + 1} ({q.type})
+                            </span>
+                            {qHasFormat && (
+                              <span className="bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                {qFormatTags.join(' · ')}
+                              </span>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleCopyRich(qCopyId, q.questionRich, `Teks Soal ${originalIndex + 1}`)
+                            }
+                            className={`text-[11px] font-semibold px-2.5 py-1 rounded-lg border flex items-center gap-1 transition-all cursor-pointer ${
+                              copiedId === qCopyId
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                : qHasFormat
+                                  ? 'bg-indigo-50/70 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
+                                  : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                            }`}
+                            title="Salin teks soal beserta format Bold/Italic/Underline untuk ditempel ke iSpring"
+                          >
+                            {copiedId === qCopyId ? (
+                              <>
+                                <Check className="w-3 h-3" />
+                                Tersalin
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                Salin Berformat
+                              </>
+                            )}
+                          </button>
                         </div>
+
                         {q.image && (
-                          <div className="mt-2 mb-3 bg-amber-50 text-amber-700 text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-2 border border-amber-200">
+                          <div className="mb-3 bg-amber-50 text-amber-700 text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-2 border border-amber-200">
                             <ImageIcon className="w-4 h-4" />
                             File Dibutuhkan: {q.image}
                           </div>
                         )}
-                        <p className="text-sm font-semibold text-slate-900 pr-12 mb-4 whitespace-pre-wrap leading-relaxed">
-                          {idx + 1}. {q.question}
+
+                        <p className="text-sm text-slate-900 mb-4 whitespace-pre-wrap leading-relaxed">
+                          <span className="font-semibold">{originalIndex + 1}. </span>
+                          <RichTextRenderer lines={q.questionRich} />
                         </p>
+
                         <div className="grid grid-cols-1 gap-2">
                           {q.answers.map((ans, optIdx) => {
-                            if (ans.isCorrect) hasCorrect = true;
                             const char = String.fromCharCode(97 + optIdx);
+                            const ansHasFormat = hasRichFormatting(ans.richText);
+                            const ansCopyId = `a-${originalIndex}-${optIdx}`;
                             return (
-                              <div key={optIdx} className={`flex items-center justify-between border px-3 py-2 rounded-lg text-xs ${ans.isCorrect ? 'bg-emerald-50 text-emerald-800 border-emerald-200 font-semibold' : 'bg-slate-50 text-slate-700 border-slate-100'}`}>
-                                <span className="flex items-center gap-2">
-                                  <span className="uppercase font-bold text-[10px] bg-slate-200/60 text-slate-600 px-1.5 py-0.5 rounded">{char}</span>
-                                  {ans.text}
-                                </span>
-                                {ans.isCorrect && (
-                                  <span className="bg-emerald-500 text-white rounded-full p-0.5 flex items-center justify-center">
-                                    <Check className="w-3 h-3" />
+                              <div
+                                key={optIdx}
+                                className={`flex items-center justify-between gap-2 border px-3 py-2 rounded-lg text-xs ${
+                                  ans.isCorrect
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                    : 'bg-slate-50 text-slate-700 border-slate-100'
+                                }`}
+                              >
+                                <span className="flex items-start gap-2 min-w-0">
+                                  <span className="uppercase font-bold text-[10px] bg-slate-200/60 text-slate-600 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
+                                    {char}
                                   </span>
-                                )}
+                                  <span className="leading-relaxed break-words">
+                                    <RichTextRenderer lines={ans.richText} />
+                                  </span>
+                                </span>
+
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  {ansHasFormat && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleCopyRich(
+                                          ansCopyId,
+                                          ans.richText,
+                                          `Opsi ${char.toUpperCase()} Soal ${originalIndex + 1}`
+                                        )
+                                      }
+                                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border flex items-center gap-1 transition-all cursor-pointer ${
+                                        copiedId === ansCopyId
+                                          ? 'bg-emerald-100 border-emerald-300 text-emerald-800'
+                                          : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-700'
+                                      }`}
+                                      title="Salin opsi berformat"
+                                    >
+                                      {copiedId === ansCopyId ? (
+                                        <Check className="w-2.5 h-2.5" />
+                                      ) : (
+                                        <Copy className="w-2.5 h-2.5" />
+                                      )}
+                                      Salin
+                                    </button>
+                                  )}
+                                  {ans.isCorrect && (
+                                    <span className="bg-emerald-500 text-white rounded-full p-0.5 flex items-center justify-center">
+                                      <Check className="w-3 h-3" />
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             );
                           })}
@@ -529,10 +541,10 @@ export default function App() {
       </footer>
 
       {/* Toast */}
-      <div className={`fixed bottom-6 right-6 transform ${toast.visible ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0'} bg-slate-950 text-white px-5 py-3.5 rounded-xl shadow-xl flex items-center gap-3 transition-all duration-300 z-50 text-sm`}>
-        {toast.type === 'success' && <CheckCircle className="w-4 h-4 text-emerald-400" />}
-        {toast.type === 'error' && <AlertTriangle className="w-4 h-4 text-rose-400" />}
-        {toast.type === 'info' && <Info className="w-4 h-4 text-indigo-400" />}
+      <div className={`fixed bottom-6 right-6 transform ${toast.visible ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0 pointer-events-none'} bg-slate-950 text-white px-5 py-3.5 rounded-xl shadow-xl flex items-center gap-3 transition-all duration-300 z-50 text-sm max-w-md`}>
+        {toast.type === 'success' && <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />}
+        {toast.type === 'error' && <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />}
+        {toast.type === 'info' && <Info className="w-4 h-4 text-indigo-400 shrink-0" />}
         <span>{toast.message}</span>
       </div>
     </div>
