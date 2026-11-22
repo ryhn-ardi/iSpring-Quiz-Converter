@@ -2,27 +2,36 @@ import React, { useMemo, useState } from 'react';
 import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
-  AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles
+  AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles, Table as TableIcon
 } from 'lucide-react';
 import { RichQuizEditor } from './components/RichQuizEditor';
 import {
   RichQuestion,
   convertAutoRich,
   convertRuleRich,
+  getFirstQuestionTable,
   questionHasRichFormatting,
+  questionHasTable,
 } from './utils/quizParser';
 import {
+  RichContentNode,
+  RichTable,
   RichText,
+  copyRichNodesToClipboard,
   copyRichTextToClipboard,
   getFormattingSummary,
   hasRichFormatting,
-  htmlToRichLines,
+  htmlToRichNodes,
 } from './utils/richText';
-import { exportRichQuizToExcel } from './utils/excelExport';
+import { TableExportMode, exportRichQuizToExcel } from './utils/excelExport';
+import {
+  downloadAllTableImages,
+  downloadQuestionTablePng,
+  getTableImageFilename,
+} from './utils/tableImage';
 
 type ToastState = { message: string; type: 'info' | 'success' | 'error'; visible: boolean };
 
-// Initial Sample Data (preserving rich formatting examples)
 const SAMPLE_AUTO_QUESTIONS_HTML = [
   '<div>1. Era musik yang mengutamakan <b>kerapian</b>, struktur simetri (tanya-jawab), dan <u>keseimbangan</u> adalah...</div>',
   '<div>a. Era Barok</div>',
@@ -89,6 +98,65 @@ function RichTextRenderer({ lines }: { lines: RichText }) {
   );
 }
 
+function RichTableRenderer({ table }: { table: RichTable }) {
+  return (
+    <div className="my-2.5 overflow-x-auto rounded-lg border border-slate-300 bg-white">
+      <table className="w-full border-collapse text-xs">
+        <tbody>
+          {table.rows.map((row, rIdx) => (
+            <tr key={rIdx} className="border-b border-slate-200 last:border-b-0">
+              {row.map((cell, cIdx) => {
+                const Tag = cell.isHeader ? 'th' : 'td';
+                return (
+                  <Tag
+                    key={cIdx}
+                    className={`border-r border-slate-200 last:border-r-0 px-2.5 py-1.5 text-left align-top ${
+                      cell.isHeader ? 'bg-slate-100 font-bold text-slate-900' : 'text-slate-700'
+                    }`}
+                  >
+                    <RichTextRenderer lines={cell.lines} />
+                  </Tag>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RichNodesRenderer({
+  nodes,
+  prefixNumber,
+}: {
+  nodes: RichContentNode[];
+  prefixNumber?: number;
+}) {
+  let renderedPrefix = false;
+  return (
+    <div className="text-sm text-slate-900 mb-4 leading-relaxed space-y-1.5">
+      {nodes.map((node, idx) => {
+        if (node.type === 'table') {
+          return (
+            <React.Fragment key={idx}>
+              <RichTableRenderer table={node} />
+            </React.Fragment>
+          );
+        }
+        const showPrefix = !renderedPrefix && prefixNumber !== undefined;
+        if (showPrefix) renderedPrefix = true;
+        return (
+          <p key={idx} className="whitespace-pre-wrap">
+            {showPrefix && <span className="font-semibold">{prefixNumber}. </span>}
+            <RichTextRenderer lines={[node.spans]} />
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function App() {
   const [mode, setMode] = useState<'auto' | 'rule'>('auto');
   const [autoQuestionsHtml, setAutoQuestionsHtml] = useState(SAMPLE_AUTO_QUESTIONS_HTML);
@@ -97,15 +165,17 @@ export default function App() {
   const [defaultPoints, setDefaultPoints] = useState<number>(10);
   const [convertedQuestions, setConvertedQuestions] = useState<RichQuestion[]>([]);
   const [previewFilter, setPreviewFilter] = useState<'all' | 'formatted'>('all');
+  const [tableExportMode, setTableExportMode] = useState<TableExportMode>('image');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingImages, setIsExportingImages] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
 
   const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ message, type, visible: true });
     setTimeout(() => {
       setToast((prev) => ({ ...prev, visible: false }));
-    }, 4000);
+    }, 4500);
   };
 
   const clearInput = () => {
@@ -119,27 +189,31 @@ export default function App() {
 
   const prosesKonversi = () => {
     try {
-      if (mode === 'auto') {
-        const lines = htmlToRichLines(autoQuestionsHtml);
-        const converted = convertAutoRich(lines, autoKeys, defaultPoints);
-        setConvertedQuestions(converted);
-        setPreviewFilter('all');
-        const fmtCount = converted.filter(questionHasRichFormatting).length;
+      const converted =
+        mode === 'auto'
+          ? convertAutoRich(htmlToRichNodes(autoQuestionsHtml), autoKeys, defaultPoints)
+          : convertRuleRich(htmlToRichNodes(ruleHtml), defaultPoints);
+
+      setConvertedQuestions(converted);
+      setPreviewFilter('all');
+
+      const fmtCount = converted.filter(questionHasRichFormatting).length;
+      const tblCount = converted.filter(questionHasTable).length;
+
+      if (tblCount > 0) {
         showToast(
-          fmtCount > 0
-            ? `Selesai! ${converted.length} soal dikonversi (${fmtCount} soal memiliki format Bold/Italic/Underline).`
-            : `Selesai! Berhasil menjodohkan ${converted.length} soal dengan kunci jawaban secara instan.`,
+          `Selesai! ${converted.length} soal dikonversi (${tblCount} soal berisi tabel siap diekspor sebagai gambar PNG atau teks).`,
+          'success'
+        );
+      } else if (fmtCount > 0) {
+        showToast(
+          `Selesai! ${converted.length} soal dikonversi (${fmtCount} soal memiliki format Bold/Italic/Underline).`,
           'success'
         );
       } else {
-        const lines = htmlToRichLines(ruleHtml);
-        const converted = convertRuleRich(lines, defaultPoints);
-        setConvertedQuestions(converted);
-        setPreviewFilter('all');
-        const fmtCount = converted.filter(questionHasRichFormatting).length;
         showToast(
-          fmtCount > 0
-            ? `Berhasil mengonversi ${converted.length} soal (${fmtCount} soal memiliki format Bold/Italic/Underline).`
+          mode === 'auto'
+            ? `Selesai! Berhasil menjodohkan ${converted.length} soal dengan kunci jawaban secara instan.`
             : `Berhasil mengonversi ${converted.length} soal secara lokal.`,
           'success'
         );
@@ -153,13 +227,23 @@ export default function App() {
     if (convertedQuestions.length === 0 || isExporting) return;
     setIsExporting(true);
     try {
-      const { filename, formattedCount } = await exportRichQuizToExcel(convertedQuestions);
-      showToast(
-        formattedCount > 0
-          ? `Excel "${filename}" diunduh dengan ${formattedCount} sel berformat Bold/Italic/Underline!`
-          : `Excel "${filename}" diunduh! Siap diimpor ke iSpring QuizMaker.`,
-        'success'
+      const { filename, formattedCount, tableImageCount } = await exportRichQuizToExcel(
+        convertedQuestions,
+        tableExportMode
       );
+      if (tableImageCount > 0) {
+        showToast(
+          `Excel "${filename}" diunduh (${tableImageCount} tabel ditautkan ke kolom Image). Jangan lupa unduh gambar tabelnya!`,
+          'success'
+        );
+      } else if (formattedCount > 0) {
+        showToast(
+          `Excel "${filename}" diunduh dengan ${formattedCount} sel berformat Bold/Italic/Underline!`,
+          'success'
+        );
+      } else {
+        showToast(`Excel "${filename}" diunduh! Siap diimpor ke iSpring QuizMaker.`, 'success');
+      }
     } catch (err: any) {
       showToast('Gagal mengekspor Excel: ' + (err?.message || 'Unknown error'), 'error');
     } finally {
@@ -167,7 +251,50 @@ export default function App() {
     }
   };
 
-  const handleCopyRich = async (id: string, lines: RichText, label: string) => {
+  const handleDownloadAllTables = async () => {
+    if (isExportingImages) return;
+    setIsExportingImages(true);
+    try {
+      const { count, filename } = await downloadAllTableImages(convertedQuestions);
+      showToast(
+        `${count} gambar tabel berhasil diunduh (${filename}). Simpan satu folder dengan file Excel sebelum impor ke iSpring.`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal membuat gambar tabel', 'error');
+    } finally {
+      setIsExportingImages(false);
+    }
+  };
+
+  const handleDownloadSingleTable = async (table: RichTable, questionIdx: number) => {
+    try {
+      const filename = await downloadQuestionTablePng(table, questionIdx);
+      showToast(`Gambar tabel "${filename}" diunduh!`, 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengunduh gambar tabel', 'error');
+    }
+  };
+
+  const handleCopyQuestionRich = async (
+    id: string,
+    nodes: RichContentNode[],
+    label: string
+  ) => {
+    const richCopied = await copyRichNodesToClipboard(nodes);
+    setCopiedId(id);
+    setTimeout(() => {
+      setCopiedId((prev) => (prev === id ? null : prev));
+    }, 2000);
+    showToast(
+      richCopied
+        ? `${label} disalin beserta format & tabel! Tempel (Ctrl+V) langsung ke iSpring.`
+        : `${label} disalin ke clipboard.`,
+      'success'
+    );
+  };
+
+  const handleCopyAnswerRich = async (id: string, lines: RichText, label: string) => {
     const richCopied = await copyRichTextToClipboard(lines);
     setCopiedId(id);
     setTimeout(() => {
@@ -175,14 +302,22 @@ export default function App() {
     }, 2000);
     showToast(
       richCopied
-        ? `${label} disalin dengan format Bold/Italic/Underline! Tempel (Ctrl+V) langsung ke iSpring.`
+        ? `${label} disalin dengan format Bold/Italic/Underline! Tempel (Ctrl+V) ke iSpring.`
         : `${label} disalin ke clipboard.`,
       'success'
     );
   };
 
   const formattedQuestionsCount = useMemo(
-    () => convertedQuestions.filter(questionHasRichFormatting).length,
+    () =>
+      convertedQuestions.filter(
+        (q) => questionHasRichFormatting(q) || questionHasTable(q)
+      ).length,
+    [convertedQuestions]
+  );
+
+  const tableQuestionsCount = useMemo(
+    () => convertedQuestions.filter(questionHasTable).length,
     [convertedQuestions]
   );
 
@@ -190,7 +325,9 @@ export default function App() {
     return convertedQuestions
       .map((q, idx) => ({ q, originalIndex: idx }))
       .filter(({ q }) =>
-        previewFilter === 'formatted' ? questionHasRichFormatting(q) : true
+        previewFilter === 'formatted'
+          ? questionHasRichFormatting(q) || questionHasTable(q)
+          : true
       );
   }, [convertedQuestions, previewFilter]);
 
@@ -248,9 +385,9 @@ export default function App() {
             {mode === 'auto' && (
               <div className="space-y-4">
                 <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl text-xs text-indigo-700">
-                  <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis (Mendukung Bold / Italic / Underline):</p>
+                  <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis (Mendukung Bold / Italic / Underline / Tabel):</p>
                   <ul className="list-disc pl-4 space-y-1">
-                    <li>Tempelkan soal langsung dari <b>Word / Google Docs</b> atau gunakan tombol <b>Impor Word (.docx)</b> — format <b>Bold</b>, <i>Italic</i>, dan <u>Underline</u> otomatis dipertahankan.</li>
+                    <li>Tempelkan soal langsung dari <b>Word / Google Docs</b> atau gunakan tombol <b>Impor Word (.docx)</b> — format <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, dan <b>Tabel</b> otomatis dipertahankan.</li>
                     <li>Masukkan daftar kunci jawaban pada kolom <b>Kunci Jawaban</b> (Contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> untuk satu jawaban, <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> untuk ganda).</li>
                     <li>Aplikasi otomatis mendeteksi soal sebagai <b>MC</b> atau <b>MR (Multiple Response)</b>.</li>
                   </ul>
@@ -284,11 +421,11 @@ export default function App() {
             {mode === 'rule' && (
               <div className="space-y-4">
                 <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl text-xs text-slate-600">
-                  <p className="font-bold mb-1 text-slate-700">Aturan Penulisan Manual (Mendukung Bold / Italic / Underline):</p>
+                  <p className="font-bold mb-1 text-slate-700">Aturan Penulisan Manual (Mendukung Bold / Italic / Underline / Tabel):</p>
                   <ul className="list-disc pl-4 space-y-1">
                     <li>Pisahkan antarsoal dengan 1 baris kosong (Double Enter).</li>
                     <li>Tandai kunci jawaban dengan tanda bintang (<span className="text-red-500 font-bold">*</span>) di awal teks pilihan (Contoh: <i>*d. Era Klasik</i>).</li>
-                    <li>Tempel dari Word/Docs atau impor file <code className="bg-slate-200/70 px-1 rounded">.docx</code> untuk mempertahankan format <b>Bold</b>, <i>Italic</i>, dan <u>Underline</u>.</li>
+                    <li>Tempel dari Word/Docs atau impor file <code className="bg-slate-200/70 px-1 rounded">.docx</code> untuk mempertahankan format <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, dan <b>Tabel</b>.</li>
                   </ul>
                 </div>
                 <RichQuizEditor
@@ -340,20 +477,76 @@ export default function App() {
         {/* Right Column: Live Preview & Excel Download (5 cols) */}
         <div className="lg:col-span-5 flex flex-col gap-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col h-full">
-            <div className="flex justify-between items-center mb-3 gap-2">
+            <div className="flex flex-wrap justify-between items-center mb-3 gap-2">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Eye className="w-5 h-5 text-indigo-600" />
                 2. Hasil ({convertedQuestions.length} Soal)
               </h2>
-              <button
-                onClick={exportToExcel}
-                disabled={convertedQuestions.length === 0 || isExporting}
-                className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-500/10 cursor-pointer"
-              >
-                <Download className="w-4 h-4" />
-                {isExporting ? 'Mengekspor...' : 'Unduh Excel'}
-              </button>
+              <div className="flex items-center gap-2">
+                {tableQuestionsCount > 0 && tableExportMode === 'image' && (
+                  <button
+                    onClick={handleDownloadAllTables}
+                    disabled={isExportingImages}
+                    className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-2 px-3 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                    title="Unduh gambar PNG semua tabel untuk ditaruh satu folder dengan Excel"
+                  >
+                    <TableIcon className="w-3.5 h-3.5" />
+                    {isExportingImages
+                      ? 'Membuat...'
+                      : `Unduh Tabel (${tableQuestionsCount})`}
+                  </button>
+                )}
+                <button
+                  onClick={exportToExcel}
+                  disabled={convertedQuestions.length === 0 || isExporting}
+                  className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-500/10 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  {isExporting ? 'Mengekspor...' : 'Unduh Excel'}
+                </button>
+              </div>
             </div>
+
+            {/* Table Export Options when tables exist */}
+            {convertedQuestions.length > 0 && tableQuestionsCount > 0 && (
+              <div className="mb-3 p-3 bg-indigo-50/80 border border-indigo-200 rounded-xl text-[11px] text-indigo-950 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold flex items-center gap-1.5">
+                    <TableIcon className="w-3.5 h-3.5 text-indigo-600" />
+                    Mode Ekspor Tabel ke iSpring ({tableQuestionsCount} soal):
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setTableExportMode('image')}
+                    className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                      tableExportMode === 'image'
+                        ? 'bg-white border-indigo-400 text-indigo-700 shadow-xs'
+                        : 'bg-indigo-100/50 border-transparent text-indigo-700/70 hover:bg-white/70'
+                    }`}
+                  >
+                    Gambar PNG di Kolom Image
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTableExportMode('text')}
+                    className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                      tableExportMode === 'text'
+                        ? 'bg-white border-indigo-400 text-indigo-700 shadow-xs'
+                        : 'bg-indigo-100/50 border-transparent text-indigo-700/70 hover:bg-white/70'
+                    }`}
+                  >
+                    Teks Berpemisah ( | )
+                  </button>
+                </div>
+                <p className="text-indigo-800/90 leading-relaxed">
+                  {tableExportMode === 'image'
+                    ? 'Disarankan untuk iSpring: Excel tidak mendukung tabel di dalam sel teks. Kolom Image akan otomatis diisi tabel_soal_X.png — klik "Unduh Tabel", lalu taruh gambar satu folder dengan file Excel saat impor ke iSpring.'
+                    : 'Tabel ditulis ke kolom Question Text dengan pemisah "|" antar kolom (rapi dibaca, namun tidak menjadi tabel grafis di iSpring).'}
+                </p>
+              </div>
+            )}
 
             {/* Filter & Rich Text Note for iSpring */}
             {convertedQuestions.length > 0 && formattedQuestionsCount > 0 && (
@@ -378,13 +571,15 @@ export default function App() {
                     }`}
                   >
                     <Sparkles className="w-3 h-3 text-amber-500" />
-                    Berformat B/I/U ({formattedQuestionsCount})
+                    Berformat / Tabel ({formattedQuestionsCount})
                   </button>
                 </div>
 
-                <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 leading-relaxed">
-                  <b>Info Format iSpring:</b> Bold, Italic, & Underline sudah tersimpan di file Excel. Jika importer Excel iSpring QuizMaker Anda tetap menghapus format sel saat impor, klik <b>Salin Berformat</b> pada soal yang bertanda lalu tempel (<code className="bg-amber-100 px-1 rounded font-bold">Ctrl+V</code>) ke iSpring.
-                </div>
+                {tableQuestionsCount === 0 && (
+                  <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 leading-relaxed">
+                    <b>Info Format iSpring:</b> Bold, Italic, & Underline sudah tersimpan di file Excel. Jika importer Excel iSpring QuizMaker Anda tetap menghapus format sel saat impor, klik <b>Salin Berformat</b> pada soal yang bertanda lalu tempel (<code className="bg-amber-100 px-1 rounded font-bold">Ctrl+V</code>) ke iSpring.
+                  </div>
+                )}
               </div>
             )}
 
@@ -399,9 +594,15 @@ export default function App() {
                 <div className="space-y-4">
                   {displayedQuestions.map(({ q, originalIndex }) => {
                     const hasCorrect = q.answers.some((a) => a.isCorrect);
-                    const qHasFormat = hasRichFormatting(q.questionRich);
-                    const qFormatTags = getFormattingSummary(q.questionRich);
+                    const qHasFormat = questionHasRichFormatting(q);
+                    const qTable = getFirstQuestionTable(q);
+                    const qFormatTags = getFormattingSummary(q.questionNodes);
                     const qCopyId = `q-${originalIndex}`;
+                    const effectiveImage =
+                      q.image ||
+                      (qTable && tableExportMode === 'image'
+                        ? getTableImageFilename(originalIndex)
+                        : '');
 
                     return (
                       <div key={originalIndex} className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm relative">
@@ -410,52 +611,69 @@ export default function App() {
                             <span className="bg-indigo-50 text-indigo-700 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
                               SOAL {originalIndex + 1} ({q.type})
                             </span>
-                            {qHasFormat && (
+                            {qFormatTags.length > 0 && (
                               <span className="bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold px-2 py-0.5 rounded-full">
                                 {qFormatTags.join(' · ')}
                               </span>
                             )}
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleCopyRich(qCopyId, q.questionRich, `Teks Soal ${originalIndex + 1}`)
-                            }
-                            className={`text-[11px] font-semibold px-2.5 py-1 rounded-lg border flex items-center gap-1 transition-all cursor-pointer ${
-                              copiedId === qCopyId
-                                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                                : qHasFormat
-                                  ? 'bg-indigo-50/70 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
-                                  : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
-                            }`}
-                            title="Salin teks soal beserta format Bold/Italic/Underline untuk ditempel ke iSpring"
-                          >
-                            {copiedId === qCopyId ? (
-                              <>
-                                <Check className="w-3 h-3" />
-                                Tersalin
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-3 h-3" />
-                                Salin Berformat
-                              </>
+                          <div className="flex items-center gap-1.5">
+                            {qTable && (
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadSingleTable(qTable, originalIndex)}
+                                className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-emerald-200 bg-emerald-50/70 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1 transition-all cursor-pointer"
+                                title="Unduh tabel ini sebagai gambar PNG"
+                              >
+                                <Download className="w-3 h-3" />
+                                PNG
+                              </button>
                             )}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleCopyQuestionRich(
+                                  qCopyId,
+                                  q.questionNodes,
+                                  `Teks Soal ${originalIndex + 1}`
+                                )
+                              }
+                              className={`text-[11px] font-semibold px-2.5 py-1 rounded-lg border flex items-center gap-1 transition-all cursor-pointer ${
+                                copiedId === qCopyId
+                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                  : qHasFormat || qTable
+                                    ? 'bg-indigo-50/70 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
+                                    : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                              }`}
+                              title="Salin soal beserta format & tabel untuk ditempel ke iSpring"
+                            >
+                              {copiedId === qCopyId ? (
+                                <>
+                                  <Check className="w-3 h-3" />
+                                  Tersalin
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  Salin Berformat
+                                </>
+                              )}
+                            </button>
+                          </div>
                         </div>
 
-                        {q.image && (
+                        {effectiveImage && (
                           <div className="mb-3 bg-amber-50 text-amber-700 text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-2 border border-amber-200">
                             <ImageIcon className="w-4 h-4" />
-                            File Dibutuhkan: {q.image}
+                            File Kolom Image: {effectiveImage}
                           </div>
                         )}
 
-                        <p className="text-sm text-slate-900 mb-4 whitespace-pre-wrap leading-relaxed">
-                          <span className="font-semibold">{originalIndex + 1}. </span>
-                          <RichTextRenderer lines={q.questionRich} />
-                        </p>
+                        <RichNodesRenderer
+                          nodes={q.questionNodes}
+                          prefixNumber={originalIndex + 1}
+                        />
 
                         <div className="grid grid-cols-1 gap-2">
                           {q.answers.map((ans, optIdx) => {
@@ -485,7 +703,7 @@ export default function App() {
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        handleCopyRich(
+                                        handleCopyAnswerRich(
                                           ansCopyId,
                                           ans.richText,
                                           `Opsi ${char.toUpperCase()} Soal ${originalIndex + 1}`

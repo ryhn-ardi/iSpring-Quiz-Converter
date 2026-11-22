@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bold, Italic, Underline, RemoveFormatting, FileUp } from 'lucide-react';
+import { Bold, Italic, Underline, RemoveFormatting, FileUp, Table as TableIcon } from 'lucide-react';
 import mammoth from 'mammoth';
 import {
   escapeHtml,
-  htmlToRichLines,
-  richTextToEditorHtml,
-  richTextToHtml,
+  htmlToRichNodes,
+  richNodesToEditorHtml,
+  richNodesToHtml,
 } from '../utils/richText';
 
 type RichQuizEditorProps = {
@@ -35,7 +35,7 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
     !valueHtml ||
     valueHtml === '<br>' ||
     valueHtml === '<div><br></div>' ||
-    valueHtml.replace(/<[^>]*>/g, '').trim() === '';
+    (valueHtml.replace(/<[^>]*>/g, '').trim() === '' && !valueHtml.includes('<table'));
 
   useEffect(() => {
     const el = editorRef.current;
@@ -46,7 +46,6 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
     }
   }, [valueHtml]);
 
-  // Initial mount population
   useEffect(() => {
     const el = editorRef.current;
     if (el && el.innerHTML !== valueHtml) {
@@ -96,6 +95,20 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
     emitChange();
   };
 
+  const insertSampleTable = () => {
+    const el = editorRef.current;
+    if (!el) return;
+    el.focus();
+    const tableHtml =
+      '<table><tbody>' +
+      '<tr><th>Kolom 1</th><th>Kolom 2</th></tr>' +
+      '<tr><td>Data A1</td><td>Data B1</td></tr>' +
+      '<tr><td>Data A2</td><td>Data B2</td></tr>' +
+      '</tbody></table><div><br></div>';
+    document.execCommand('insertHTML', false, tableHtml);
+    emitChange();
+  };
+
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     e.preventDefault();
     const clipboard = e.clipboardData;
@@ -105,9 +118,9 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
     let cleanHtmlToInsert = '';
 
     if (rawHtml && rawHtml.trim().length > 0) {
-      const richLines = htmlToRichLines(rawHtml);
-      if (richLines.length > 0) {
-        cleanHtmlToInsert = richTextToHtml(richLines);
+      const richNodes = htmlToRichNodes(rawHtml);
+      if (richNodes.length > 0) {
+        cleanHtmlToInsert = richNodesToHtml(richNodes, false);
       }
     }
 
@@ -132,8 +145,8 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
         { arrayBuffer },
         { styleMap: ['u => u'] }
       );
-      const richLines = htmlToRichLines(result.value);
-      const editorHtml = richTextToEditorHtml(richLines);
+      const richNodes = htmlToRichNodes(result.value);
+      const editorHtml = richNodesToEditorHtml(richNodes);
 
       if (editorRef.current) {
         editorRef.current.innerHTML = editorHtml;
@@ -141,8 +154,11 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
       lastHtmlRef.current = editorHtml;
       onChangeHtml(editorHtml);
 
+      const tableCount = richNodes.filter((n) => n.type === 'table').length;
       onNotify?.(
-        `Berhasil mengimpor "${file.name}" (${richLines.length} baris) beserta format Bold, Italic, dan Underline.`,
+        tableCount > 0
+          ? `Berhasil mengimpor "${file.name}" (${tableCount} tabel & format teks terjaga).`
+          : `Berhasil mengimpor "${file.name}" beserta format Bold, Italic, dan Underline.`,
         'success'
       );
     } catch (err: any) {
@@ -215,6 +231,17 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
           >
             <RemoveFormatting className="w-3.5 h-3.5" />
           </button>
+          <button
+            type="button"
+            title="Sisipkan Contoh Tabel"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              insertSampleTable();
+            }}
+            className="p-1.5 rounded-lg text-xs text-slate-600 hover:bg-slate-200/70 transition-colors flex items-center gap-1 cursor-pointer"
+          >
+            <TableIcon className="w-3.5 h-3.5" />
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
@@ -229,7 +256,7 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
             type="button"
             onClick={() => fileInputRef.current?.click()}
             className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:border-indigo-300 hover:text-indigo-700 text-[11px] font-semibold text-slate-600 flex items-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
-            title="Impor langsung dari file Microsoft Word (.docx) sambil menjaga Bold, Italic, dan Underline"
+            title="Impor langsung dari file Microsoft Word (.docx) sambil menjaga Bold, Italic, Underline, dan Tabel"
           >
             <FileUp className="w-3.5 h-3.5 text-indigo-600" />
             Impor Word (.docx)
@@ -252,7 +279,7 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
           onPaste={handlePaste}
           onKeyUp={refreshActiveFormats}
           onMouseUp={refreshActiveFormats}
-          className="w-full min-h-[256px] max-h-[380px] overflow-y-auto p-4 text-sm font-mono leading-relaxed text-slate-800 focus:outline-none [&_b]:font-bold [&_strong]:font-bold [&_i]:italic [&_em]:italic [&_u]:underline"
+          className="w-full min-h-[256px] max-h-[380px] overflow-y-auto p-4 text-sm font-mono leading-relaxed text-slate-800 focus:outline-none [&_b]:font-bold [&_strong]:font-bold [&_i]:italic [&_em]:italic [&_u]:underline [&_table]:w-full [&_table]:border-collapse [&_table]:my-2 [&_table]:text-xs [&_td]:border [&_td]:border-slate-300 [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_th]:border [&_th]:border-slate-300 [&_th]:bg-slate-100 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:font-bold [&_th]:text-left"
         />
       </div>
     </div>

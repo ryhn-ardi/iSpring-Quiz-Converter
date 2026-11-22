@@ -1,14 +1,18 @@
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
-import { RichQuestion } from './quizParser';
+import { RichQuestion, questionHasTable } from './quizParser';
 import {
   RichText,
   TextSpan,
   hasRichFormatting,
   mergeAdjacentSpans,
   prependPlainPrefixToRichText,
+  richNodesToRichText,
   richTextToPlain,
 } from './richText';
+import { getTableImageFilename } from './tableImage';
+
+export type TableExportMode = 'image' | 'text';
 
 const SPREADSHEETML_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
@@ -36,8 +40,9 @@ function triggerBlobDownload(blob: Blob, filename: string) {
 }
 
 export async function exportRichQuizToExcel(
-  questions: RichQuestion[]
-): Promise<{ filename: string; formattedCount: number }> {
+  questions: RichQuestion[],
+  tableMode: TableExportMode = 'image'
+): Promise<{ filename: string; formattedCount: number; tableImageCount: number }> {
   const headers = [
     'Question Type', 'Question Text', 'Image', 'Video', 'Audio',
     'Answer 1', 'Answer 2', 'Answer 3', 'Answer 4', 'Answer 5',
@@ -47,6 +52,7 @@ export async function exportRichQuizToExcel(
 
   const richTokenMap = new Map<string, RichText>();
   let tokenCounter = 0;
+  let tableImageCount = 0;
 
   const toCellValue = (rich: RichText): string => {
     if (!hasRichFormatting(rich)) {
@@ -58,11 +64,24 @@ export async function exportRichQuizToExcel(
   };
 
   const rows: string[][] = [];
-  questions.forEach((q) => {
+  questions.forEach((q, idx) => {
     const row = Array(18).fill('');
+    const hasTable = questionHasTable(q);
+
+    const questionTextRich =
+      hasTable && tableMode === 'image'
+        ? richNodesToRichText(q.questionNodes, false)
+        : q.questionRich;
+
+    let imageFile = q.image || '';
+    if (hasTable && tableMode === 'image' && !imageFile) {
+      imageFile = getTableImageFilename(idx);
+      tableImageCount++;
+    }
+
     row[0] = q.type;
-    row[1] = toCellValue(q.questionRich);
-    row[2] = q.image || '';
+    row[1] = toCellValue(questionTextRich);
+    row[2] = imageFile;
 
     q.answers.forEach((ans, optIdx) => {
       if (optIdx < 10) {
@@ -84,7 +103,7 @@ export async function exportRichQuizToExcel(
   ws['!cols'] = [
     { wch: 14 }, // Question Type
     { wch: 52 }, // Question Text
-    { wch: 18 }, // Image
+    { wch: 20 }, // Image
     { wch: 12 }, // Video
     { wch: 12 }, // Audio
     { wch: 24 }, // Answer 1
@@ -108,7 +127,7 @@ export async function exportRichQuizToExcel(
 
   if (richTokenMap.size === 0) {
     XLSX.writeFile(wb, filename);
-    return { filename, formattedCount: 0 };
+    return { filename, formattedCount: 0, tableImageCount };
   }
 
   const rawBuffer = XLSX.write(wb, {
@@ -185,5 +204,5 @@ export async function exportRichQuizToExcel(
 
   triggerBlobDownload(outBlob, filename);
 
-  return { filename, formattedCount: richTokenMap.size };
+  return { filename, formattedCount: richTokenMap.size, tableImageCount };
 }
