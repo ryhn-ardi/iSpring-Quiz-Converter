@@ -4,7 +4,7 @@ import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
   AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles, Table as TableIcon,
-  FileText, FileUp, Sigma
+  FileText, FileUp, Sigma, ClipboardList, FileArchive
 } from 'lucide-react';
 import { RichQuizEditor } from './components/RichQuizEditor';
 import {
@@ -30,6 +30,7 @@ import {
   richNodesToPlain,
 } from './utils/richText';
 import { TableExportMode, exportRichQuizToExcel } from './utils/excelExport';
+import { exportRichQuizToISpringQuiz } from './utils/quizExport';
 import {
   downloadAllTableImages,
   downloadQuestionTablePng,
@@ -56,6 +57,12 @@ import {
   extractMathSegmentsFromQuestion,
   getMathImageFilename,
 } from './utils/mathImage';
+import {
+  analyzeQuizAnswers,
+  describeIssueReasons,
+  formatEmptyAnswerReport,
+  upsertAutoKeyLine,
+} from './utils/quizAnalyzer';
 
 type ToastState = { message: string; type: 'info' | 'success' | 'error'; visible: boolean };
 
@@ -318,17 +325,20 @@ export default function App() {
   const [ruleHtml, setRuleHtml] = useState(SAMPLE_RULE_HTML);
   const [defaultPoints, setDefaultPoints] = useState<number>(10);
   const [convertedQuestions, setConvertedQuestions] = useState<RichQuestion[]>([]);
-  const [previewFilter, setPreviewFilter] = useState<'all' | 'formatted'>('all');
+  const [previewFilter, setPreviewFilter] = useState<'all' | 'incomplete' | 'formatted'>('all');
+  const [highlightedQuestionIdx, setHighlightedQuestionIdx] = useState<number | null>(null);
   const [tableExportMode, setTableExportMode] = useState<TableExportMode>('image');
   const [mathEngine, setMathEngine] = useState<MathRenderEngine>('katex');
   const [dollarSyntax, setDollarSyntax] = useState<DollarSyntaxMode>('auto');
   const [mathExportMode, setMathExportMode] = useState<MathExportMode>('unicode');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingQuiz, setIsExportingQuiz] = useState(false);
   const [isExportingImages, setIsExportingImages] = useState(false);
   const [isExportingMathImages, setIsExportingMathImages] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
   const headerDocxInputRef = useRef<HTMLInputElement>(null);
+  const questionCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ message, type, visible: true });
@@ -354,12 +364,18 @@ export default function App() {
           : convertRuleRich(htmlToRichNodes(ruleHtml), defaultPoints);
 
       setConvertedQuestions(converted);
+      const analysis = analyzeQuizAnswers(converted);
       setPreviewFilter('all');
 
       const fmtCount = converted.filter(questionHasRichFormatting).length;
       const tblCount = converted.filter(questionHasTable).length;
 
-      if (tblCount > 0) {
+      if (analysis.incompleteCount > 0) {
+        showToast(
+          `Konversi selesai (${converted.length} soal), tetapi ${analysis.incompleteCount} soal masih memiliki jawaban/kunci kosong. Lihat panel Analisis di kanan.`,
+          'info'
+        );
+      } else if (tblCount > 0) {
         showToast(
           `Selesai! ${converted.length} soal dikonversi (${tblCount} soal berisi tabel siap diekspor sebagai gambar PNG atau teks).`,
           'success'
@@ -440,12 +456,28 @@ export default function App() {
         );
       } else {
         setAutoQuestionsHtml(qHtml);
-        showToast(
-          parsed.hasKeysSection
-            ? `Soal dari "${file.name}" dimuat, tetapi isi "Kunci Jawaban" kosong.`
-            : `Soal dari "${file.name}" dimuat! Tambahkan heading "Kunci Jawaban" di Word atau isi kolom Kunci Jawaban di kanan.`,
-          'info'
-        );
+        try {
+          const converted = convertAutoRich(
+            parsed.questionNodes,
+            autoKeys || '',
+            defaultPoints
+          );
+          setConvertedQuestions(converted);
+          const analysis = analyzeQuizAnswers(converted);
+          showToast(
+            analysis.incompleteCount > 0
+              ? `Soal dari "${file.name}" dimuat (${converted.length} soal), ${analysis.incompleteCount} soal jawabannya masih kosong.`
+              : `Soal dari "${file.name}" dimuat & dicocokkan dengan kunci yang ada.`,
+            'info'
+          );
+        } catch {
+          showToast(
+            parsed.hasKeysSection
+              ? `Soal dari "${file.name}" dimuat, tetapi isi "Kunci Jawaban" kosong.`
+              : `Soal dari "${file.name}" dimuat! Tambahkan heading "Kunci Jawaban" di Word atau isi kolom Kunci Jawaban di kanan.`,
+            'info'
+          );
+        }
       }
     } catch (err: any) {
       showToast(
@@ -478,26 +510,60 @@ export default function App() {
           mathExportMode,
           dollarSyntax
         );
+      const hasWarning = answerAnalysis.incompleteCount > 0;
+      const incompleteWarn = hasWarning
+        ? ` Catatan: ${answerAnalysis.incompleteCount} soal masih memiliki jawaban/kunci kosong.`
+        : '';
       if (tableImageCount > 0 || mathImageCount > 0) {
         const parts: string[] = [];
         if (tableImageCount > 0) parts.push(`${tableImageCount} gambar tabel`);
         if (mathImageCount > 0) parts.push(`${mathImageCount} gambar rumus`);
         showToast(
-          `Excel "${filename}" diunduh (${parts.join(' & ')} ditautkan ke kolom Image). Jangan lupa unduh file gambarnya!`,
-          'success'
+          `Excel "${filename}" diunduh (${parts.join(' & ')} ditautkan ke kolom Image).${incompleteWarn}`,
+          hasWarning ? 'info' : 'success'
         );
       } else if (formattedCount > 0) {
         showToast(
-          `Excel "${filename}" diunduh dengan ${formattedCount} sel berformat Bold/Italic/Underline!`,
-          'success'
+          `Excel "${filename}" diunduh dengan ${formattedCount} sel berformat Bold/Italic/Underline!${incompleteWarn}`,
+          hasWarning ? 'info' : 'success'
         );
       } else {
-        showToast(`Excel "${filename}" diunduh! Siap diimpor ke iSpring QuizMaker.`, 'success');
+        showToast(
+          `Excel "${filename}" diunduh! Siap diimpor ke iSpring QuizMaker.${incompleteWarn}`,
+          hasWarning ? 'info' : 'success'
+        );
       }
     } catch (err: any) {
       showToast('Gagal mengekspor Excel: ' + (err?.message || 'Unknown error'), 'error');
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  const exportToQuiz = async () => {
+    if (convertedQuestions.length === 0 || isExportingQuiz) return;
+    setIsExportingQuiz(true);
+    try {
+      const { filename, questionCount, formattedSlideCount } =
+        await exportRichQuizToISpringQuiz(
+          convertedQuestions,
+          mathExportMode,
+          dollarSyntax
+        );
+      const hasWarning = answerAnalysis.incompleteCount > 0;
+      const incompleteWarn = hasWarning
+        ? ` Catatan: ${answerAnalysis.incompleteCount} soal masih memiliki jawaban/kunci kosong.`
+        : '';
+      showToast(
+        formattedSlideCount > 0
+          ? `File "${filename}" (${questionCount} soal, ${formattedSlideCount} soal berformat Bold/Italic/Underline) siap dibuka di iSpring QuizMaker!${incompleteWarn}`
+          : `File "${filename}" (${questionCount} soal) diunduh & siap dibuka di iSpring QuizMaker.${incompleteWarn}`,
+        hasWarning ? 'info' : 'success'
+      );
+    } catch (err: any) {
+      showToast('Gagal membuat file .quiz: ' + (err?.message || 'Unknown error'), 'error');
+    } finally {
+      setIsExportingQuiz(false);
     }
   };
 
@@ -634,17 +700,84 @@ export default function App() {
     [convertedQuestions, dollarSyntax]
   );
 
+  const answerAnalysis = useMemo(
+    () => analyzeQuizAnswers(convertedQuestions),
+    [convertedQuestions]
+  );
+
+  const handleToggleOptionCorrect = (questionIdx: number, optionIdx: number) => {
+    const target = convertedQuestions[questionIdx];
+    if (!target) return;
+
+    const nextAnswers = target.answers.map((ans, aIdx) =>
+      aIdx === optionIdx ? { ...ans, isCorrect: !ans.isCorrect } : ans
+    );
+    const correctCount = nextAnswers.filter((a) => a.isCorrect).length;
+
+    setConvertedQuestions((prev) =>
+      prev.map((q, idx) =>
+        idx === questionIdx
+          ? {
+              ...q,
+              type: correctCount > 1 ? 'MR' : 'MC',
+              answers: nextAnswers,
+            }
+          : q
+      )
+    );
+
+    if (mode === 'auto') {
+      const qNum = target.sourceNumber ?? questionIdx + 1;
+      const letters = nextAnswers
+        .map((a, aIdx) => (a.isCorrect ? String.fromCharCode(97 + aIdx) : ''))
+        .filter(Boolean);
+      setAutoKeys((curr) => upsertAutoKeyLine(curr, qNum, letters));
+    }
+  };
+
+  const handleJumpToQuestion = (questionIdx: number) => {
+    if (previewFilter === 'formatted') {
+      setPreviewFilter('all');
+    }
+    setHighlightedQuestionIdx(questionIdx);
+    setTimeout(() => {
+      questionCardRefs.current[questionIdx]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    }, 60);
+    setTimeout(() => {
+      setHighlightedQuestionIdx((prev) => (prev === questionIdx ? null : prev));
+    }, 2200);
+  };
+
+  const handleCopyEmptyAnswerReport = async () => {
+    const report = formatEmptyAnswerReport(answerAnalysis);
+    await navigator.clipboard?.writeText(report);
+    setCopiedId('empty-report');
+    setTimeout(() => {
+      setCopiedId((prev) => (prev === 'empty-report' ? null : prev));
+    }, 2000);
+    showToast('Daftar soal yang jawabannya masih kosong disalin ke clipboard.', 'success');
+  };
+
   const displayedQuestions = useMemo(() => {
     return convertedQuestions
       .map((q, idx) => ({ q, originalIndex: idx }))
-      .filter(({ q }) =>
-        previewFilter === 'formatted'
-          ? questionHasRichFormatting(q) ||
+      .filter(({ q, originalIndex }) => {
+        if (previewFilter === 'incomplete') {
+          return answerAnalysis.issuesByIndex.has(originalIndex);
+        }
+        if (previewFilter === 'formatted') {
+          return (
+            questionHasRichFormatting(q) ||
             questionHasTable(q) ||
             questionHasMath(q)
-          : true
-      );
-  }, [convertedQuestions, previewFilter, dollarSyntax]);
+          );
+        }
+        return true;
+      });
+  }, [convertedQuestions, previewFilter, dollarSyntax, answerAnalysis]);
 
   return (
     <div className="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans">
@@ -657,7 +790,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">iSpring Quiz Converter Masansa</h1>
-              <p className="text-xs text-slate-500 font-medium">Ubah Soal Teks Menjadi Template Excel iSpring Suite</p>
+              <p className="text-xs text-slate-500 font-medium">Ubah Soal Teks Menjadi File .quiz & Template Excel iSpring Suite</p>
             </div>
           </div>
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
@@ -874,6 +1007,15 @@ export default function App() {
                   </button>
                 )}
                 <button
+                  onClick={exportToQuiz}
+                  disabled={convertedQuestions.length === 0 || isExportingQuiz}
+                  className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-indigo-500/10 cursor-pointer"
+                  title="Unduh paket file .quiz siap buka di iSpring QuizMaker dengan format Bold/Italic/Underline terjaga"
+                >
+                  <FileArchive className="w-4 h-4" />
+                  {isExportingQuiz ? 'Membuat .quiz...' : 'Unduh .quiz'}
+                </button>
+                <button
                   onClick={exportToExcel}
                   disabled={convertedQuestions.length === 0 || isExporting}
                   className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-500/10 cursor-pointer"
@@ -1019,10 +1161,118 @@ export default function App() {
               </div>
             )}
 
+            {/* Empty Answer Analysis Panel */}
+            {convertedQuestions.length > 0 && (
+              <div
+                className={`mb-3 rounded-xl border p-3.5 text-xs ${
+                  answerAnalysis.incompleteCount === 0
+                    ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50/70 border-rose-200 text-rose-950'
+                }`}
+              >
+                {answerAnalysis.incompleteCount === 0 ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-bold">
+                      <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>
+                        Analisis Jawaban: Semua {answerAnalysis.totalQuestions} soal memiliki opsi & kunci jawaban lengkap.
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-extrabold text-rose-800">
+                        <ClipboardList className="w-4 h-4 text-rose-600 shrink-0" />
+                        <span>
+                          Analisis Jawaban Kosong: {answerAnalysis.incompleteCount} dari {answerAnalysis.totalQuestions} soal
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleCopyEmptyAnswerReport}
+                          className="px-2 py-1 rounded-lg border border-rose-200 bg-white hover:bg-rose-100/70 text-[11px] font-semibold text-rose-700 flex items-center gap-1 transition-colors cursor-pointer"
+                          title="Salin daftar nomor soal yang jawabannya masih kosong"
+                        >
+                          {copiedId === 'empty-report' ? (
+                            <Check className="w-3 h-3" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          Salin Daftar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPreviewFilter((prev) =>
+                              prev === 'incomplete' ? 'all' : 'incomplete'
+                            )
+                          }
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                            previewFilter === 'incomplete'
+                              ? 'bg-rose-700 text-white shadow-xs'
+                              : 'bg-rose-600 hover:bg-rose-700 text-white'
+                          }`}
+                        >
+                          {previewFilter === 'incomplete'
+                            ? 'Tampilkan Semua'
+                            : `Filter Kosong (${answerAnalysis.incompleteCount})`}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 text-[11px]">
+                      <div className="bg-white/90 border border-rose-200/80 rounded-lg px-2.5 py-1.5">
+                        <span className="block text-slate-500 font-medium">Kunci Kosong</span>
+                        <span className="text-sm font-extrabold text-rose-700">
+                          {answerAnalysis.noKeyCount} soal
+                        </span>
+                      </div>
+                      <div className="bg-white/90 border border-rose-200/80 rounded-lg px-2.5 py-1.5">
+                        <span className="block text-slate-500 font-medium">Opsi Tidak Ada</span>
+                        <span className="text-sm font-extrabold text-rose-700">
+                          {answerAnalysis.noOptionsCount} soal
+                        </span>
+                      </div>
+                      <div className="bg-white/90 border border-rose-200/80 rounded-lg px-2.5 py-1.5">
+                        <span className="block text-slate-500 font-medium">Teks Opsi Kosong</span>
+                        <span className="text-sm font-extrabold text-amber-700">
+                          {answerAnalysis.emptyOptionTextCount} soal
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                      {answerAnalysis.issues.map((issue) => (
+                        <button
+                          key={issue.index}
+                          type="button"
+                          onClick={() => handleJumpToQuestion(issue.index)}
+                          className="w-full text-left px-2.5 py-1.5 rounded-lg bg-white/90 hover:bg-white border border-rose-200/70 hover:border-rose-400 transition-all flex items-center justify-between gap-2 text-[11px] cursor-pointer"
+                        >
+                          <span className="min-w-0 truncate">
+                            <span className="font-extrabold text-rose-700 mr-1.5">
+                              Soal #{issue.displayNumber}
+                            </span>
+                            <span className="text-slate-600">{issue.questionSnippet}</span>
+                          </span>
+                          <span className="shrink-0 font-bold text-rose-700 bg-rose-100/80 px-2 py-0.5 rounded">
+                            {describeIssueReasons(issue)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Filter & Rich Text Note for iSpring */}
-            {convertedQuestions.length > 0 && formattedQuestionsCount > 0 && (
+            {convertedQuestions.length > 0 &&
+              (formattedQuestionsCount > 0 || answerAnalysis.incompleteCount > 0) && (
               <div className="mb-3 space-y-2.5">
-                <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
+                <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
                   <button
                     onClick={() => setPreviewFilter('all')}
                     className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
@@ -1031,26 +1281,43 @@ export default function App() {
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    Semua Soal ({convertedQuestions.length})
+                    Semua ({convertedQuestions.length})
                   </button>
-                  <button
-                    onClick={() => setPreviewFilter('formatted')}
-                    className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                      previewFilter === 'formatted'
-                        ? 'bg-white text-indigo-700 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    <Sparkles className="w-3 h-3 text-amber-500" />
-                    Berformat / Tabel / Rumus ({formattedQuestionsCount})
-                  </button>
+                  {answerAnalysis.incompleteCount > 0 && (
+                    <button
+                      onClick={() => setPreviewFilter('incomplete')}
+                      className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                        previewFilter === 'incomplete'
+                          ? 'bg-white text-rose-700 shadow-xs'
+                          : 'text-rose-700/80 hover:text-rose-800'
+                      }`}
+                    >
+                      <AlertCircle className="w-3 h-3" />
+                      Jawaban Kosong ({answerAnalysis.incompleteCount})
+                    </button>
+                  )}
+                  {formattedQuestionsCount > 0 && (
+                    <button
+                      onClick={() => setPreviewFilter('formatted')}
+                      className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                        previewFilter === 'formatted'
+                          ? 'bg-white text-indigo-700 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <Sparkles className="w-3 h-3 text-amber-500" />
+                      Berformat / Rumus ({formattedQuestionsCount})
+                    </button>
+                  )}
                 </div>
 
-                {tableQuestionsCount === 0 && mathQuestionsCount === 0 && (
-                  <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 leading-relaxed">
-                    <b>Info Format iSpring:</b> Bold, Italic, & Underline sudah tersimpan di file Excel. Jika importer Excel iSpring QuizMaker Anda tetap menghapus format sel saat impor, klik <b>Salin Berformat</b> pada soal yang bertanda lalu tempel (<code className="bg-amber-100 px-1 rounded font-bold">Ctrl+V</code>) ke iSpring.
-                  </div>
-                )}
+                {formattedQuestionsCount > 0 &&
+                  tableQuestionsCount === 0 &&
+                  mathQuestionsCount === 0 && (
+                    <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 leading-relaxed">
+                      <b>Info Format iSpring:</b> Gunakan tombol <b>Unduh .quiz</b> untuk membuka langsung di iSpring QuizMaker dengan format <b>Bold</b>, <i>Italic</i>, &amp; <u>Underline</u> terjaga penuh, atau gunakan <b>Unduh Excel</b> / <b>Salin Berformat</b> (<code className="bg-amber-100 px-1 rounded font-bold">Ctrl+V</code>).
+                    </div>
+                  )}
               </div>
             )}
 
@@ -1061,9 +1328,29 @@ export default function App() {
                   <p className="text-sm font-medium">Belum ada hasil konversi</p>
                   <p className="text-xs text-slate-400 mt-1">Masukkan data, lalu klik tombol Proses.</p>
                 </div>
+              ) : displayedQuestions.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center py-12 text-slate-500">
+                  <CheckCircle className="w-10 h-10 mb-2.5 text-emerald-500" />
+                  <p className="text-sm font-bold text-slate-700">
+                    Tidak ada soal pada filter ini
+                  </p>
+                  <p className="text-xs text-slate-400 mt-1 mb-3">
+                    {previewFilter === 'incomplete'
+                      ? 'Semua soal sudah memiliki opsi & kunci jawaban lengkap.'
+                      : 'Coba tampilkan semua soal untuk melihat daftar lengkap.'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewFilter('all')}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
+                  >
+                    Tampilkan Semua Soal ({convertedQuestions.length})
+                  </button>
+                </div>
               ) : (
                 <div className="space-y-4">
                   {displayedQuestions.map(({ q, originalIndex }) => {
+                    const issue = answerAnalysis.issuesByIndex.get(originalIndex);
                     const hasCorrect = q.answers.some((a) => a.isCorrect);
                     const qHasFormat = questionHasRichFormatting(q);
                     const qTable = getFirstQuestionTable(q);
@@ -1085,12 +1372,26 @@ export default function App() {
                           ? getMathImageFilename(originalIndex)
                           : '');
 
+                    const displayNum = q.sourceNumber ?? originalIndex + 1;
+                    const isHighlighted = highlightedQuestionIdx === originalIndex;
                     return (
-                      <div key={originalIndex} className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm relative">
+                      <div
+                        key={originalIndex}
+                        ref={(el) => {
+                          questionCardRefs.current[originalIndex] = el;
+                        }}
+                        className={`bg-white p-4 rounded-xl border shadow-sm relative transition-all ${
+                          isHighlighted
+                            ? 'border-indigo-500 ring-2 ring-indigo-200'
+                            : issue
+                              ? 'border-rose-300 ring-1 ring-rose-100'
+                              : 'border-slate-200/80'
+                        }`}
+                      >
                         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="bg-indigo-50 text-indigo-700 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                              SOAL {originalIndex + 1} ({q.type})
+                              SOAL {displayNum} ({q.type})
                             </span>
                             {qFormatTags.length > 0 && (
                               <span className="bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold px-2 py-0.5 rounded-full">
@@ -1183,77 +1484,115 @@ export default function App() {
 
                         <RichNodesRenderer
                           nodes={q.questionNodes}
-                          prefixNumber={originalIndex + 1}
+                          prefixNumber={displayNum}
                           mathEngine={mathEngine}
                           dollarSyntax={dollarSyntax}
                         />
 
-                        <div className="grid grid-cols-1 gap-2">
-                          {q.answers.map((ans, optIdx) => {
-                            const char = String.fromCharCode(97 + optIdx);
-                            const ansHasFormat = hasRichFormatting(ans.richText);
-                            const ansCopyId = `a-${originalIndex}-${optIdx}`;
-                            return (
-                              <div
-                                key={optIdx}
-                                className={`flex items-center justify-between gap-2 border px-3 py-2 rounded-lg text-xs ${
-                                  ans.isCorrect
-                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                    : 'bg-slate-50 text-slate-700 border-slate-100'
-                                }`}
-                              >
-                                <span className="flex items-start gap-2 min-w-0">
-                                  <span className="uppercase font-bold text-[10px] bg-slate-200/60 text-slate-600 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
-                                    {char}
+                        {q.answers.length === 0 ? (
+                          <div className="border border-dashed border-rose-300 bg-rose-50/70 rounded-lg px-3 py-2.5 text-xs text-rose-700 font-medium">
+                            Opsi pilihan jawaban kosong / tidak terdeteksi (pastikan opsi diawali huruf a., b., c., d.).
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 gap-2">
+                            {q.answers.map((ans, optIdx) => {
+                              const char = String.fromCharCode(97 + optIdx);
+                              const ansHasFormat = hasRichFormatting(ans.richText);
+                              const isOptionEmpty = ans.text.trim() === '';
+                              const ansCopyId = `a-${originalIndex}-${optIdx}`;
+                              return (
+                                <div
+                                  key={optIdx}
+                                  className={`flex items-center justify-between gap-2 border px-3 py-2 rounded-lg text-xs ${
+                                    isOptionEmpty
+                                      ? 'bg-amber-50/80 text-amber-800 border-amber-300'
+                                      : ans.isCorrect
+                                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                        : 'bg-slate-50 text-slate-700 border-slate-100'
+                                  }`}
+                                >
+                                  <span className="flex items-start gap-2 min-w-0">
+                                    <span className="uppercase font-bold text-[10px] bg-slate-200/60 text-slate-600 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
+                                      {char}
+                                    </span>
+                                    <span className="leading-relaxed break-words">
+                                      {isOptionEmpty ? (
+                                        <span className="italic text-amber-700">
+                                          (Teks opsi {char.toUpperCase()} masih kosong)
+                                        </span>
+                                      ) : (
+                                        <RichTextRenderer
+                                          lines={ans.richText}
+                                          mathEngine={mathEngine}
+                                          dollarSyntax={dollarSyntax}
+                                        />
+                                      )}
+                                    </span>
                                   </span>
-                                  <span className="leading-relaxed break-words">
-                                    <RichTextRenderer
-                                      lines={ans.richText}
-                                      mathEngine={mathEngine}
-                                      dollarSyntax={dollarSyntax}
-                                    />
-                                  </span>
-                                </span>
 
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  {ansHasFormat && (
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    {ansHasFormat && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleCopyAnswerRich(
+                                            ansCopyId,
+                                            ans.richText,
+                                            `Opsi ${char.toUpperCase()} Soal ${displayNum}`
+                                          )
+                                        }
+                                        className={`px-2 py-0.5 rounded text-[10px] font-semibold border flex items-center gap-1 transition-all cursor-pointer ${
+                                          copiedId === ansCopyId
+                                            ? 'bg-emerald-100 border-emerald-300 text-emerald-800'
+                                            : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-700'
+                                        }`}
+                                        title="Salin opsi berformat"
+                                      >
+                                        {copiedId === ansCopyId ? (
+                                          <Check className="w-2.5 h-2.5" />
+                                        ) : (
+                                          <Copy className="w-2.5 h-2.5" />
+                                        )}
+                                        Salin
+                                      </button>
+                                    )}
                                     <button
                                       type="button"
-                                      onClick={() =>
-                                        handleCopyAnswerRich(
-                                          ansCopyId,
-                                          ans.richText,
-                                          `Opsi ${char.toUpperCase()} Soal ${originalIndex + 1}`
-                                        )
-                                      }
-                                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border flex items-center gap-1 transition-all cursor-pointer ${
-                                        copiedId === ansCopyId
-                                          ? 'bg-emerald-100 border-emerald-300 text-emerald-800'
-                                          : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-700'
+                                      onClick={() => handleToggleOptionCorrect(originalIndex, optIdx)}
+                                      className={`rounded-full p-0.5 flex items-center justify-center transition-all cursor-pointer ${
+                                        ans.isCorrect
+                                          ? 'bg-emerald-500 text-white hover:bg-emerald-600'
+                                          : 'px-2 py-0.5 rounded border border-slate-200 bg-white text-[10px] font-semibold text-slate-500 hover:border-emerald-300 hover:text-emerald-700'
                                       }`}
-                                      title="Salin opsi berformat"
+                                      title={
+                                        ans.isCorrect
+                                          ? 'Batalkan tanda kunci jawaban'
+                                          : `Tandai opsi ${char.toUpperCase()} sebagai kunci jawaban`
+                                      }
                                     >
-                                      {copiedId === ansCopyId ? (
-                                        <Check className="w-2.5 h-2.5" />
+                                      {ans.isCorrect ? (
+                                        <Check className="w-3 h-3" />
                                       ) : (
-                                        <Copy className="w-2.5 h-2.5" />
+                                        'Tandai'
                                       )}
-                                      Salin
                                     </button>
-                                  )}
-                                  {ans.isCorrect && (
-                                    <span className="bg-emerald-500 text-white rounded-full p-0.5 flex items-center justify-center">
-                                      <Check className="w-3 h-3" />
-                                    </span>
-                                  )}
+                                  </div>
                                 </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        {!hasCorrect && (
-                          <div className="mt-3 bg-rose-50 text-rose-600 text-[10px] font-bold px-2 py-1.5 rounded flex items-center justify-center gap-1">
-                            <AlertCircle className="w-3.5 h-3.5" /> Kunci Jawaban Belum Cocok
+                              );
+                            })}
+                          </div>
+                        )}
+                        {issue && (
+                          <div className="mt-3 bg-rose-50 text-rose-700 border border-rose-200/80 text-[11px] font-semibold px-3 py-2 rounded-lg flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                              {describeIssueReasons(issue)}
+                            </span>
+                            {!hasCorrect && q.answers.length > 0 && (
+                              <span className="text-[10px] font-normal text-rose-600">
+                                Klik &quot;Tandai&quot; di opsi untuk isi kunci
+                              </span>
+                            )}
                           </div>
                         )}
                       </div>

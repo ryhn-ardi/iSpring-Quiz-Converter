@@ -25,6 +25,7 @@ export type RichAnswer = {
 
 export type RichQuestion = {
   type: 'MC' | 'MR';
+  sourceNumber?: number;
   question: string;
   questionRich: RichText;
   questionNodes: RichContentNode[];
@@ -142,12 +143,12 @@ export function convertAutoRich(
   const hasAnyContent = questionNodesInput.some(
     (n) => n.type === 'table' || richLineToPlain(n.spans).trim() !== ''
   );
-  if (!hasAnyContent || !kText) {
-    throw new Error('Kolom soal dan kolom kunci jawaban wajib diisi keduanya!');
+  if (!hasAnyContent) {
+    throw new Error('Kolom daftar soal wajib diisi terlebih dahulu!');
   }
 
   const keysMap = new Map<number, string[]>();
-  const keyLines = kText.split('\n');
+  const keyLines = kText ? kText.split('\n') : [];
 
   keyLines.forEach((line) => {
     const cleanLine = line.trim().toLowerCase();
@@ -161,7 +162,7 @@ export function convertAutoRich(
     }
   });
 
-  if (keysMap.size === 0) {
+  if (kText && keysMap.size === 0) {
     keyLines.forEach((line, idx) => {
       const cleanLine = line.trim().toLowerCase();
       const letters = Array.from(cleanLine.matchAll(/\b([a-j])\b/g)).map((m) => m[1]);
@@ -232,6 +233,7 @@ export function convertAutoRich(
 
     converted.push({
       type: isMR ? 'MR' : 'MC',
+      sourceNumber: qNum,
       question: richTextToPlain(questionRich),
       questionRich,
       questionNodes: cleanQuestionNodes,
@@ -318,6 +320,7 @@ export function convertRuleRich(
 
     converted.push({
       type: isMR ? 'MR' : 'MC',
+      sourceNumber: qNum,
       question: richTextToPlain(questionRich),
       questionRich,
       questionNodes: cleanQuestionNodes,

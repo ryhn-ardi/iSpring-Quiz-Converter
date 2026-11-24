@@ -1,0 +1,23 @@
+{
+    "storageInfo": "[]",
+    "title": "quiz tesst",
+    "courseLessonTitle": "",
+    "courseDescription": "",
+    "courseAuthor": "",
+    "courseTags": "",
+    "courseGuid": "B4E73B34-813A-4F25-B11C-8DDC9A19DA22",
+    "lastPublishingPath": "",
+    "publishSettings": "",
+    "lmsPublishOptions": "{\"apiStandard\":\"AS_SCORM12\",\"reportStatuses\":\"RS_PASSED_FAILED\",\"useXAPIEndpoint\":\"T_FALSE\"}",
+    "onlinePublishOptions": "{\"ispringCloud\":{},\"ispringLms\":{},\"ispringStudio\":{}}",
+    "quiz": {
+        "version": "16",
+        "compatible": "2",
+        "showAllQuestions": "false",
+        "gradeInfo": {
+            "maxScore": "10",
+            "passingScore": "80",
+            "isPassingScorePercent": "true"
+        }
+    }
+}
