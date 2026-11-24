@@ -23,6 +23,40 @@ const QUIZ_ASSET_PATHS = {
 const THEME_ZIP_ENTRY_PATH =
   'theme/theme-e29509-7544ca-6183b75997937-950011195_17996-23028.qhtml';
 
+export type ResultSlideDisplayOptions = {
+  showUserScore: boolean;
+  showPassingScore: boolean;
+  allowReview: boolean;
+  showDetailedReport: boolean;
+  allowRetry: boolean;
+};
+
+export type QuizResultSlideOptions = {
+  passed: ResultSlideDisplayOptions;
+  failed: ResultSlideDisplayOptions;
+};
+
+export const DEFAULT_PASSED_SLIDE_OPTIONS: ResultSlideDisplayOptions = {
+  showUserScore: true,
+  showPassingScore: true,
+  allowReview: true,
+  showDetailedReport: false,
+  allowRetry: true,
+};
+
+export const DEFAULT_FAILED_SLIDE_OPTIONS: ResultSlideDisplayOptions = {
+  showUserScore: false,
+  showPassingScore: false,
+  allowReview: false,
+  showDetailedReport: false,
+  allowRetry: false,
+};
+
+export const DEFAULT_QUIZ_RESULT_OPTIONS: QuizResultSlideOptions = {
+  passed: { ...DEFAULT_PASSED_SLIDE_OPTIONS },
+  failed: { ...DEFAULT_FAILED_SLIDE_OPTIONS },
+};
+
 export type ISpringTextFormat = {
   b?: true;
   i?: true;
@@ -80,11 +114,40 @@ export type ISpringSlide = {
   an: Record<string, unknown>;
 };
 
+export type ISpringResultSlide = {
+  i: string;
+  tp: string;
+  D?: Record<string, unknown>;
+  v?: boolean;
+  C?: {
+    Rs?: {
+      ps?: { v: number; u: string };
+      a?: number;
+      sc?: boolean;
+      ap?: boolean;
+      sg?: boolean;
+      sa?: boolean;
+      f?: Record<string, unknown>;
+    };
+  };
+  s?: Record<string, unknown>;
+  a?: {
+    o?: Array<{ I?: string; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
+  an?: Record<string, unknown>;
+};
+
 export type ISpringDocument = {
   i: string;
   T: string;
   sl: {
-    r: Record<string, unknown>;
+    r: {
+      g?: ISpringResultSlide[];
+      s?: ISpringResultSlide[];
+      r?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
     g: Array<{
       i: string;
       T: string;
@@ -143,7 +206,7 @@ async function loadQuizTemplates(): Promise<CachedTemplates> {
   return cachedTemplatesPromise;
 }
 
-export function generateISpringId(): string {
+export function generateISpringId(usedIds?: Set<string>): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   const part = (len: number) => {
     let out = '';
@@ -152,7 +215,26 @@ export function generateISpringId(): string {
     }
     return out;
   };
-  return `${part(12)}-${part(12)}`;
+  let id = `${part(12)}-${part(12)}`;
+  while (usedIds && usedIds.has(id)) {
+    id = `${part(12)}-${part(12)}`;
+  }
+  usedIds?.add(id);
+  return id;
+}
+
+function collectExistingIds(obj: unknown, ids: Set<string>) {
+  if (!obj || typeof obj !== 'object') return;
+  if (Array.isArray(obj)) {
+    for (const item of obj) collectExistingIds(item, ids);
+    return;
+  }
+  const record = obj as Record<string, unknown>;
+  if (typeof record.i === 'string') ids.add(record.i);
+  if (typeof record.id === 'string') ids.add(record.id);
+  for (const val of Object.values(record)) {
+    collectExistingIds(val, ids);
+  }
 }
 
 function buildTextFormat(span: TextSpan): ISpringTextFormat | undefined {
@@ -166,12 +248,45 @@ function buildTextFormat(span: TextSpan): ISpringTextFormat | undefined {
   };
 }
 
+function sanitizeRunText(text: string): string {
+  return text
+    .replace(/\t/g, ' ')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+}
+
+function splitRichTextByNewlines(lines: RichText): RichText {
+  const expanded: RichText = [];
+  for (const line of lines) {
+    let currentLine: TextSpan[] = [];
+    for (const span of line) {
+      const cleaned = sanitizeRunText(span.text).replace(/\r\n|\r/g, '\n');
+      if (!cleaned.includes('\n')) {
+        if (cleaned) currentLine.push({ ...span, text: cleaned });
+        continue;
+      }
+      const parts = cleaned.split('\n');
+      parts.forEach((part, idx) => {
+        if (idx > 0) {
+          expanded.push(currentLine);
+          currentLine = [];
+        }
+        if (part) {
+          currentLine.push({ ...span, text: part });
+        }
+      });
+    }
+    expanded.push(currentLine);
+  }
+  return expanded;
+}
+
 export function richTextToISpringParagraphs(lines: RichText): ISpringParagraph[] {
-  if (!lines || lines.length === 0) {
+  const normalizedLines = splitRichTextByNewlines(lines || []);
+  if (normalizedLines.length === 0) {
     return [{ tp: 'paragraph', c: [] }];
   }
 
-  return lines.map((rawLine) => {
+  return normalizedLines.map((rawLine) => {
     const line = mergeAdjacentSpans(rawLine);
     const runs: ISpringTextRun[] = [];
 
@@ -204,11 +319,48 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function applyResultSlideOptions(
+  slide: ISpringResultSlide | undefined,
+  opts: ResultSlideDisplayOptions
+) {
+  if (!slide) return;
+
+  if (slide.a?.o && Array.isArray(slide.a.o)) {
+    slide.a.o = slide.a.o.filter((shape) => {
+      const id = shape.I;
+      if (!opts.showUserScore && (id === 'awardedScoreLabel' || id === 'awardedScoreValue')) {
+        return false;
+      }
+      if (!opts.showPassingScore && (id === 'passingScoreLabel' || id === 'passingScoreValue')) {
+        return false;
+      }
+      if (!opts.allowReview && id === 'reviewBtn') {
+        return false;
+      }
+      if (!opts.showDetailedReport && id === 'reportBtn') {
+        return false;
+      }
+      if (!opts.allowRetry && id === 'retryBtn') {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  if (slide.C?.Rs) {
+    slide.C.Rs.a = opts.allowRetry ? 1 : 0;
+    if (!opts.showDetailedReport) {
+      slide.C.Rs.sg = false;
+    }
+  }
+}
+
 export function buildISpringDocument(
   baseDocument: ISpringDocument,
   questions: RichQuestion[],
   mathMode: MathExportMode = 'unicode',
-  dollarSyntax: DollarSyntaxMode = 'auto'
+  dollarSyntax: DollarSyntaxMode = 'auto',
+  resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS
 ): { document: ISpringDocument; formattedSlideCount: number } {
   const doc = cloneJson(baseDocument);
 
@@ -218,11 +370,20 @@ export function buildISpringDocument(
     throw new Error('Struktur grup atau slide template document.json tidak valid.');
   }
 
+  const usedIds = new Set<string>();
+  collectExistingIds(doc, usedIds);
+
+  // Apply Final Slide Options for Passed (index 0) and Failed (index 1)
+  if (Array.isArray(doc.sl?.r?.g)) {
+    applyResultSlideOptions(doc.sl.r.g[0], resultOptions.passed);
+    applyResultSlideOptions(doc.sl.r.g[1], resultOptions.failed);
+  }
+
   let formattedSlideCount = 0;
 
   const slides: ISpringSlide[] = questions.map((q) => {
     const slide = cloneJson(templateSlide);
-    slide.i = generateISpringId();
+    slide.i = generateISpringId(usedIds);
     slide.tp = q.type === 'MR' ? 'MultipleResponse' : 'MultipleChoice';
     slide.v = true;
 
@@ -238,24 +399,35 @@ export function buildISpringDocument(
       d: richTextToISpringParagraphs(questionRich),
     };
 
-    slide.C = {
-      chs: q.answers.map((ans) => {
-        const processedAns =
-          mathMode !== 'raw'
-            ? replaceMathInRichTextWithUnicode(ans.richText, dollarSyntax)
-            : ans.richText;
-        if (hasRichFormatting(processedAns)) {
-          questionHasFormat = true;
-        }
-        return {
-          i: generateISpringId(),
-          t: {
-            d: richTextToISpringParagraphs(processedAns),
-          },
-          c: Boolean(ans.isCorrect),
-        };
-      }),
-    };
+    const choices: ISpringChoice[] = q.answers.map((ans) => {
+      const processedAns =
+        mathMode !== 'raw'
+          ? replaceMathInRichTextWithUnicode(ans.richText, dollarSyntax)
+          : ans.richText;
+      if (hasRichFormatting(processedAns)) {
+        questionHasFormat = true;
+      }
+      return {
+        i: generateISpringId(usedIds),
+        t: {
+          d: richTextToISpringParagraphs(processedAns),
+        },
+        c: Boolean(ans.isCorrect),
+      };
+    });
+
+    // Guard against 0-choice slides which can trigger freezes on save in iSpring
+    if (choices.length === 0) {
+      choices.push({
+        i: generateISpringId(usedIds),
+        t: {
+          d: richTextToISpringParagraphs([[{ text: '(Opsi belum diisi)' }]]),
+        },
+        c: false,
+      });
+    }
+
+    slide.C = { chs: choices };
 
     if (questionHasFormat) {
       formattedSlideCount++;
@@ -287,7 +459,8 @@ function triggerQuizDownload(blob: Blob, filename: string) {
 export async function exportRichQuizToISpringQuiz(
   questions: RichQuestion[],
   mathMode: MathExportMode = 'unicode',
-  dollarSyntax: DollarSyntaxMode = 'auto'
+  dollarSyntax: DollarSyntaxMode = 'auto',
+  resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS
 ): Promise<{
   filename: string;
   questionCount: number;
@@ -304,18 +477,35 @@ export async function exportRichQuizToISpringQuiz(
     baseDocument,
     questions,
     mathMode,
-    dollarSyntax
+    dollarSyntax,
+    resultOptions
   );
 
   const zip = new JSZip();
-  zip.file('metainfo.json', metainfoBytes);
-  zip.file('workspace.json', workspaceBytes);
-  zip.file('document.json', JSON.stringify(generatedDoc));
-  zip.file(THEME_ZIP_ENTRY_PATH, themeBytes);
+  zip.file('metainfo.json', metainfoBytes, {
+    createFolders: false,
+    compression: 'DEFLATE',
+    dosPermissions: 0x20,
+  });
+  zip.file('workspace.json', workspaceBytes, {
+    createFolders: false,
+    compression: 'DEFLATE',
+    dosPermissions: 0x20,
+  });
+  zip.file('document.json', JSON.stringify(generatedDoc), {
+    createFolders: false,
+    compression: 'DEFLATE',
+    dosPermissions: 0x20,
+  });
+  zip.file(THEME_ZIP_ENTRY_PATH, themeBytes, {
+    createFolders: false,
+    compression: 'STORE',
+    dosPermissions: 0x20,
+  });
 
   const blob = await zip.generateAsync({
     type: 'blob',
-    compression: 'DEFLATE',
+    platform: 'DOS',
     mimeType: 'application/octet-stream',
   });
 

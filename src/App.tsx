@@ -30,7 +30,12 @@ import {
   richNodesToPlain,
 } from './utils/richText';
 import { TableExportMode, exportRichQuizToExcel } from './utils/excelExport';
-import { exportRichQuizToISpringQuiz } from './utils/quizExport';
+import {
+  DEFAULT_QUIZ_RESULT_OPTIONS,
+  QuizResultSlideOptions,
+  ResultSlideDisplayOptions,
+  exportRichQuizToISpringQuiz,
+} from './utils/quizExport';
 import {
   downloadAllTableImages,
   downloadQuestionTablePng,
@@ -334,6 +339,10 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingQuiz, setIsExportingQuiz] = useState(false);
+  const [quizResultOptions, setQuizResultOptions] = useState<QuizResultSlideOptions>(
+    DEFAULT_QUIZ_RESULT_OPTIONS
+  );
+  const [showQuizResultSettings, setShowQuizResultSettings] = useState(false);
   const [isExportingImages, setIsExportingImages] = useState(false);
   const [isExportingMathImages, setIsExportingMathImages] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
@@ -548,7 +557,8 @@ export default function App() {
         await exportRichQuizToISpringQuiz(
           convertedQuestions,
           mathExportMode,
-          dollarSyntax
+          dollarSyntax,
+          quizResultOptions
         );
       const hasWarning = answerAnalysis.incompleteCount > 0;
       const incompleteWarn = hasWarning
@@ -1158,6 +1168,105 @@ export default function App() {
                     ? 'Disarankan untuk iSpring: Excel tidak mendukung tabel di dalam sel teks. Kolom Image akan otomatis diisi tabel_soal_X.png — klik "Unduh Tabel", lalu taruh gambar satu folder dengan file Excel saat impor ke iSpring.'
                     : 'Tabel ditulis ke kolom Question Text dengan pemisah "|" antar kolom (rapi dibaca, namun tidak menjadi tabel grafis di iSpring).'}
                 </p>
+              </div>
+            )}
+
+            {/* Final Slide Options for .quiz */}
+            {convertedQuestions.length > 0 && (
+              <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50/80 text-[11px] text-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setShowQuizResultSettings((prev) => !prev)}
+                  className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2 font-bold text-slate-800 hover:bg-slate-100/70 rounded-xl transition-colors cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Sliders className="w-3.5 h-3.5 text-indigo-600" />
+                    Pengaturan Final Slide (.quiz):
+                    <span className="font-normal text-slate-500">
+                      Slide Gagal {Object.values(quizResultOptions.failed).every((v) => !v)
+                        ? '(Semua info & retry disembunyikan)'
+                        : '(Kustom)'}
+                    </span>
+                  </span>
+                  <span className="text-[10px] font-bold text-indigo-600">
+                    {showQuizResultSettings ? 'Tutup' : 'Ubah'}
+                  </span>
+                </button>
+
+                {showQuizResultSettings && (
+                  <div className="px-3.5 pb-3 pt-1 border-t border-slate-200/80 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {(['failed', 'passed'] as const).map((branch) => {
+                      const isFailed = branch === 'failed';
+                      const branchOpts = quizResultOptions[branch];
+                      const items: { key: keyof ResultSlideDisplayOptions; label: string }[] = [
+                        { key: 'showUserScore', label: "Show user's score" },
+                        { key: 'showPassingScore', label: 'Show passing score' },
+                        { key: 'allowReview', label: 'Allow user to review quiz' },
+                        { key: 'showDetailedReport', label: 'Show detailed report' },
+                        { key: 'allowRetry', label: 'Allow user to retry quiz' },
+                      ];
+                      return (
+                        <div
+                          key={branch}
+                          className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-100">
+                            <span
+                              className={`font-extrabold ${
+                                isFailed ? 'text-rose-700' : 'text-emerald-700'
+                              }`}
+                            >
+                              {isFailed ? 'When user fails:' : 'When user passes:'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const allOff = Object.values(branchOpts).every((v) => !v);
+                                setQuizResultOptions((prev) => ({
+                                  ...prev,
+                                  [branch]: {
+                                    showUserScore: allOff,
+                                    showPassingScore: allOff,
+                                    allowReview: allOff,
+                                    showDetailedReport: false,
+                                    allowRetry: allOff,
+                                  },
+                                }));
+                              }}
+                              className="text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer"
+                            >
+                              {Object.values(branchOpts).every((v) => !v)
+                                ? 'Aktifkan standar'
+                                : 'Matikan semua'}
+                            </button>
+                          </div>
+                          {items.map((item) => (
+                            <label
+                              key={item.key}
+                              className="flex items-center gap-2 text-[11px] text-slate-700 cursor-pointer select-none"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={branchOpts[item.key]}
+                                onChange={(e) =>
+                                  setQuizResultOptions((prev) => ({
+                                    ...prev,
+                                    [branch]: {
+                                      ...prev[branch],
+                                      [item.key]: e.target.checked,
+                                    },
+                                  }))
+                                }
+                                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <span>{item.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
