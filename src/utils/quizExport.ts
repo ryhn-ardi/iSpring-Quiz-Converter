@@ -106,6 +106,8 @@ export type ISpringSlide = {
     t: { e: boolean; v: number };
     sh: boolean;
     a: number;
+    ap?: boolean;
+    al?: { e: boolean; v: number };
     cc: number;
     B: { t: string };
     F: Record<string, unknown>;
@@ -293,11 +295,11 @@ export function richTextToISpringParagraphs(lines: RichText): ISpringParagraph[]
     for (const span of line) {
       if (!span.text) continue;
       const tf = buildTextFormat(span);
-      const tokens = span.text.match(/\p{L}+|[^\p{L}]+/gu) ?? [span.text];
+      const tokens = span.text.match(/[\p{L}\p{M}]+|[^\p{L}\p{M}]+/gu) ?? [span.text];
 
       for (const tok of tokens) {
         if (!tok) continue;
-        const isWord = /^\p{L}+$/u.test(tok);
+        const isWord = /^[\p{L}\p{M}]+$/u.test(tok);
         runs.push({
           t: tok,
           ...(tf ? { tf: { ...tf } } : {}),
@@ -363,7 +365,7 @@ export function buildISpringDocument(
   mathMode: MathExportMode = 'unicode',
   dollarSyntax: DollarSyntaxMode = 'auto',
   resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS
-): { document: ISpringDocument; formattedSlideCount: number } {
+): { document: ISpringDocument; formattedSlideCount: number; totalPoints: number } {
   const doc = cloneJson(baseDocument);
 
   const templateGroup = doc.sl?.g?.[0];
@@ -382,11 +384,13 @@ export function buildISpringDocument(
   }
 
   let formattedSlideCount = 0;
+  let totalPoints = 0;
 
   const slides: ISpringSlide[] = questions.map((q) => {
     const slide = cloneJson(templateSlide);
+    const isMR = q.type === 'MR';
     slide.i = generateISpringId(usedIds);
-    slide.tp = q.type === 'MR' ? 'MultipleResponse' : 'MultipleChoice';
+    slide.tp = isMR ? 'MultipleResponse' : 'MultipleChoice';
     slide.v = true;
 
     let questionRich = richNodesToRichText(q.questionNodes, true);
@@ -435,17 +439,41 @@ export function buildISpringDocument(
       formattedSlideCount++;
     }
 
+    const pts = Number.isFinite(q.points) ? Math.max(0, q.points) : 10;
+    totalPoints += pts;
+
     if (slide.s?.e) {
-      const pts = Number.isFinite(q.points) ? Math.max(0, q.points) : 10;
       slide.s.e.pt = pts;
+    }
+
+    if (isMR) {
+      // iSpring MultipleResponse requires `ap` and `al` inside slide.s
+      slide.s = {
+        ee: slide.s.ee,
+        e: slide.s.e,
+        t: slide.s.t,
+        sh: slide.s.sh,
+        a: slide.s.a,
+        ap: false,
+        al: { e: false, v: 1 },
+        cc: slide.s.cc,
+        B: slide.s.B,
+        F: slide.s.F,
+      };
+    } else {
+      delete slide.s.ap;
+      delete slide.s.al;
     }
 
     return slide;
   });
 
   templateGroup.S = slides;
+  if (templateGroup.s && typeof templateGroup.s === 'object') {
+    templateGroup.s.rs = slides.length;
+  }
 
-  return { document: doc, formattedSlideCount };
+  return { document: doc, formattedSlideCount, totalPoints };
 }
 
 function triggerQuizDownload(blob: Blob, filename: string) {
@@ -457,6 +485,53 @@ function triggerQuizDownload(blob: Blob, filename: string) {
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * JSZip writes verNeeded=10 (PKZIP 1.0) even on DEFLATE (method=8) entries,
+ * whereas PKZIP 2.0 and iSpring's own ZIP writer use verNeeded=20.
+ * Walk EOCD -> CDH -> LFH and upgrade verNeeded < 20 to 20 without altering CRCs/offsets.
+ */
+export function patchZipVersionNeeded(zipBytes: Uint8Array): Uint8Array {
+  const view = new DataView(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
+  const minPos = Math.max(0, zipBytes.byteLength - 65557);
+
+  let eocdOffset = -1;
+  for (let i = zipBytes.byteLength - 22; i >= minPos; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) return zipBytes;
+
+  const cdCount = view.getUint16(eocdOffset + 10, true);
+  let cdOffset = view.getUint32(eocdOffset + 16, true);
+
+  for (let i = 0; i < cdCount; i++) {
+    if (cdOffset + 46 > zipBytes.byteLength) break;
+    if (view.getUint32(cdOffset, true) !== 0x02014b50) break;
+
+    if (view.getUint16(cdOffset + 6, true) < 20) {
+      view.setUint16(cdOffset + 6, 20, true);
+    }
+
+    const lfhOffset = view.getUint32(cdOffset + 42, true);
+    if (
+      lfhOffset + 30 <= zipBytes.byteLength &&
+      view.getUint32(lfhOffset, true) === 0x04034b50 &&
+      view.getUint16(lfhOffset + 4, true) < 20
+    ) {
+      view.setUint16(lfhOffset + 4, 20, true);
+    }
+
+    const nlen = view.getUint16(cdOffset + 28, true);
+    const elen = view.getUint16(cdOffset + 30, true);
+    const clen = view.getUint16(cdOffset + 32, true);
+    cdOffset += 46 + nlen + elen + clen;
+  }
+
+  return zipBytes;
 }
 
 export async function exportRichQuizToISpringQuiz(
@@ -476,7 +551,7 @@ export async function exportRichQuizToISpringQuiz(
   const { metainfoBytes, workspaceBytes, themeBytes, baseDocument } =
     await loadQuizTemplates();
 
-  const { document: generatedDoc, formattedSlideCount } = buildISpringDocument(
+  const { document: generatedDoc, formattedSlideCount, totalPoints } = buildISpringDocument(
     baseDocument,
     questions,
     mathMode,
@@ -484,8 +559,22 @@ export async function exportRichQuizToISpringQuiz(
     resultOptions
   );
 
+  let metainfoContent: Uint8Array | string = metainfoBytes;
+  try {
+    const metainfoText = new TextDecoder().decode(metainfoBytes);
+    const metainfoObj = JSON.parse(metainfoText) as {
+      quiz?: { gradeInfo?: { maxScore?: string } };
+    };
+    if (metainfoObj?.quiz?.gradeInfo) {
+      metainfoObj.quiz.gradeInfo.maxScore = String(totalPoints);
+      metainfoContent = JSON.stringify(metainfoObj, null, 4).replace(/\n/g, '\r\n') + '\r\n';
+    }
+  } catch {
+    metainfoContent = metainfoBytes;
+  }
+
   const zip = new JSZip();
-  zip.file('metainfo.json', metainfoBytes, {
+  zip.file('metainfo.json', metainfoContent, {
     createFolders: false,
     compression: 'DEFLATE',
     dosPermissions: 0x20,
@@ -506,11 +595,12 @@ export async function exportRichQuizToISpringQuiz(
     dosPermissions: 0x20,
   });
 
-  const blob = await zip.generateAsync({
-    type: 'blob',
+  const rawZip = await zip.generateAsync({
+    type: 'uint8array',
     platform: 'DOS',
-    mimeType: 'application/octet-stream',
   });
+  const patchedZip = patchZipVersionNeeded(rawZip);
+  const blob = new Blob([patchedZip], { type: 'application/octet-stream' });
 
   const filename = `iSpring_Quiz_${Date.now().toString().slice(-5)}.quiz`;
   triggerQuizDownload(blob, filename);

@@ -1,0 +1,23 @@
+{
+    "storageInfo": "[]",
+    "title": "sampel",
+    "courseLessonTitle": "",
+    "courseDescription": "",
+    "courseAuthor": "",
+    "courseTags": "",
+    "courseGuid": "B3E81622-8B70-459D-A7CE-6AB551E6104A",
+    "lastPublishingPath": "",
+    "publishSettings": "",
+    "lmsPublishOptions": "{\"apiStandard\":\"AS_SCORM12\",\"reportStatuses\":\"RS_PASSED_FAILED\",\"useXAPIEndpoint\":\"T_FALSE\"}",
+    "onlinePublishOptions": "{\"ispringCloud\":{},\"ispringLms\":{},\"ispringStudio\":{}}",
+    "quiz": {
+        "version": "16",
+        "compatible": "2",
+        "showAllQuestions": "false",
+        "gradeInfo": {
+            "maxScore": "20",
+            "passingScore": "400",
+            "isPassingScorePercent": "true"
+        }
+    }
+}
