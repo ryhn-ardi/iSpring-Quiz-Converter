@@ -1,17 +1,20 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import 'katex/dist/katex.min.css';
 import {
   FileSpreadsheet, Zap, Sliders, Edit3, Award, Trash2, Eye,
   Download, Database, Check, AlertCircle, CheckCircle,
   AlertTriangle, Info, Image as ImageIcon, Copy, Sparkles, Table as TableIcon,
-  FileText, FileUp, Sigma, ClipboardList, FileArchive
+  FileText, FileUp, Sigma, ClipboardList, FileArchive, Lock, LogOut, ShieldCheck
 } from 'lucide-react';
 import { RichQuizEditor } from './components/RichQuizEditor';
+import { AdminLoginModal } from './components/AdminLoginModal';
+import { OwnerProfileData, OwnerSpotlight } from './components/OwnerSpotlight';
 import {
   RichQuestion,
   convertAutoRich,
   convertRuleRich,
   getFirstQuestionTable,
+  questionHasImage,
   questionHasRichFormatting,
   questionHasTable,
 } from './utils/quizParser';
@@ -62,6 +65,11 @@ import {
   extractMathSegmentsFromQuestion,
   getMathImageFilename,
 } from './utils/mathImage';
+import {
+  downloadAllWordImages,
+  downloadQuestionWordImage,
+  getWordImageFilename,
+} from './utils/wordImage';
 import {
   analyzeQuizAnswers,
   describeIssueReasons,
@@ -306,6 +314,21 @@ function RichNodesRenderer({
             </React.Fragment>
           );
         }
+        if (node.type === 'image') {
+          const showPrefix = !renderedPrefix && prefixNumber !== undefined;
+          if (showPrefix) renderedPrefix = true;
+          return (
+            <div key={idx} className="my-2">
+              {showPrefix && <span className="font-semibold block mb-1">{prefixNumber}.</span>}
+              <img
+                src={node.dataUrl}
+                alt={node.alt || 'Gambar soal'}
+                referrerPolicy="no-referrer"
+                className="max-h-64 max-w-full rounded-lg border border-slate-200 bg-white object-contain"
+              />
+            </div>
+          );
+        }
         const showPrefix = !renderedPrefix && prefixNumber !== undefined;
         if (showPrefix) renderedPrefix = true;
         return (
@@ -345,15 +368,68 @@ export default function App() {
   const [showQuizResultSettings, setShowQuizResultSettings] = useState(false);
   const [isExportingImages, setIsExportingImages] = useState(false);
   const [isExportingMathImages, setIsExportingMathImages] = useState(false);
+  const [isExportingWordImages, setIsExportingWordImages] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  const [adminUsername, setAdminUsername] = useState<string | null>(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [ownerProfile, setOwnerProfile] = useState<OwnerProfileData>({
+    ownerName: 'ms. Reyhan lohyaa',
+    ownerRole: 'Pemilik Website',
+    quote: 'Mengajar dengan hati, menyusun evaluasi lebih cepat dan rapi setiap hari.',
+    photoDataUrl: null,
+  });
   const headerDocxInputRef = useRef<HTMLInputElement>(null);
   const questionCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/profile')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (active && data?.profile) {
+          setOwnerProfile(data.profile);
+        }
+      })
+      .catch(() => {
+        // Keep default profile silently if network is busy
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ message, type, visible: true });
     setTimeout(() => {
       setToast((prev) => ({ ...prev, visible: false }));
     }, 4500);
+  };
+
+  const handleAdminLoginSuccess = (token: string, username: string) => {
+    setAdminToken(token);
+    setAdminUsername(username);
+    showToast(`Selamat datang, ${username}! Anda kini dapat mengubah foto & quote.`, 'success');
+  };
+
+  const handleAdminLogout = async () => {
+    const token = adminToken;
+    setAdminToken(null);
+    setAdminUsername(null);
+    if (token) {
+      fetch('/api/admin/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    showToast('Anda telah keluar dari sesi admin.', 'info');
+  };
+
+  const handleSessionExpired = () => {
+    setAdminToken(null);
+    setAdminUsername(null);
+    setIsLoginModalOpen(true);
+    showToast('Sesi admin kedaluwarsa. Silakan login kembali.', 'error');
   };
 
   const clearInput = () => {
@@ -378,11 +454,17 @@ export default function App() {
 
       const fmtCount = converted.filter(questionHasRichFormatting).length;
       const tblCount = converted.filter(questionHasTable).length;
+      const imgCount = converted.filter(questionHasImage).length;
 
       if (analysis.incompleteCount > 0) {
         showToast(
           `Konversi selesai (${converted.length} soal), tetapi ${analysis.incompleteCount} soal masih memiliki jawaban/kunci kosong. Lihat panel Analisis di kanan.`,
           'info'
+        );
+      } else if (imgCount > 0) {
+        showToast(
+          `Selesai! ${converted.length} soal dikonversi (${imgCount} soal bergambar siap ditautkan ke Excel + Unduh Gambar Word).`,
+          'success'
         );
       } else if (tblCount > 0) {
         showToast(
@@ -411,6 +493,14 @@ export default function App() {
     try {
       const parsed = await parseDocxFile(file);
       const qHtml = richNodesToEditorHtml(parsed.questionNodes);
+      const mediaParts: string[] = [];
+      if (parsed.tableCount > 0) mediaParts.push(`${parsed.tableCount} tabel`);
+      if (parsed.imageCount > 0) mediaParts.push(`${parsed.imageCount} gambar`);
+      const mediaNote = mediaParts.length > 0 ? ` (${mediaParts.join(' & ')} terjaga)` : '';
+      const unsupportedNote =
+        parsed.unsupportedImageCount > 0
+          ? ` Catatan: ${parsed.unsupportedImageCount} gambar format EMF/WMF Word tidak didukung browser—ubah ke PNG/JPG terlebih dahulu.`
+          : '';
 
       if (parsed.hasKeysSection && parsed.keysText.trim()) {
         setMode('auto');
@@ -426,17 +516,15 @@ export default function App() {
           );
           setConvertedQuestions(converted);
           showToast(
-            `Berhasil mengekstrak ${converted.length} soal & kunci jawaban dari "${file.name}"${
-              parsed.tableCount > 0 ? ` (${parsed.tableCount} tabel terjaga)` : ''
-            }!`,
-            'success'
+            `Berhasil mengekstrak ${converted.length} soal & kunci jawaban dari "${file.name}"${mediaNote}!${unsupportedNote}`,
+            parsed.unsupportedImageCount > 0 ? 'info' : 'success'
           );
         } catch (convErr: any) {
           setConvertedQuestions([]);
           showToast(
             `Soal & kunci diekstrak dari "${file.name}", namun perlu dicek: ${
               convErr?.message || ''
-            }`,
+            }${unsupportedNote}`,
             'info'
           );
         }
@@ -451,8 +539,8 @@ export default function App() {
             const converted = convertRuleRich(parsed.questionNodes, defaultPoints);
             setConvertedQuestions(converted);
             showToast(
-              `Berhasil mengimpor & mengonversi ${converted.length} soal dari "${file.name}".`,
-              'success'
+              `Berhasil mengimpor & mengonversi ${converted.length} soal dari "${file.name}"${mediaNote}.${unsupportedNote}`,
+              parsed.unsupportedImageCount > 0 ? 'info' : 'success'
             );
             return;
           } catch {
@@ -460,7 +548,7 @@ export default function App() {
           }
         }
         showToast(
-          `Soal dari "${file.name}" dimuat (tidak ditemukan bagian "Kunci Jawaban").`,
+          `Soal dari "${file.name}" dimuat${mediaNote} (tidak ditemukan bagian "Kunci Jawaban").${unsupportedNote}`,
           'info'
         );
       } else {
@@ -475,15 +563,15 @@ export default function App() {
           const analysis = analyzeQuizAnswers(converted);
           showToast(
             analysis.incompleteCount > 0
-              ? `Soal dari "${file.name}" dimuat (${converted.length} soal), ${analysis.incompleteCount} soal jawabannya masih kosong.`
-              : `Soal dari "${file.name}" dimuat & dicocokkan dengan kunci yang ada.`,
+              ? `Soal dari "${file.name}" dimuat (${converted.length} soal${mediaParts.length ? ', ' + mediaParts.join(' & ') : ''}), ${analysis.incompleteCount} soal jawabannya masih kosong.${unsupportedNote}`
+              : `Soal dari "${file.name}" dimuat${mediaNote} & dicocokkan dengan kunci yang ada.${unsupportedNote}`,
             'info'
           );
         } catch {
           showToast(
             parsed.hasKeysSection
-              ? `Soal dari "${file.name}" dimuat, tetapi isi "Kunci Jawaban" kosong.`
-              : `Soal dari "${file.name}" dimuat! Tambahkan heading "Kunci Jawaban" di Word atau isi kolom Kunci Jawaban di kanan.`,
+              ? `Soal dari "${file.name}" dimuat${mediaNote}, tetapi isi "Kunci Jawaban" kosong.${unsupportedNote}`
+              : `Soal dari "${file.name}" dimuat${mediaNote}! Tambahkan heading "Kunci Jawaban" di Word atau isi kolom Kunci Jawaban di kanan.${unsupportedNote}`,
             'info'
           );
         }
@@ -512,7 +600,7 @@ export default function App() {
     if (convertedQuestions.length === 0 || isExporting) return;
     setIsExporting(true);
     try {
-      const { filename, formattedCount, tableImageCount, mathImageCount } =
+      const { filename, formattedCount, tableImageCount, mathImageCount, wordImageCount } =
         await exportRichQuizToExcel(
           convertedQuestions,
           tableExportMode,
@@ -523,8 +611,9 @@ export default function App() {
       const incompleteWarn = hasWarning
         ? ` Catatan: ${answerAnalysis.incompleteCount} soal masih memiliki jawaban/kunci kosong.`
         : '';
-      if (tableImageCount > 0 || mathImageCount > 0) {
+      if (wordImageCount > 0 || tableImageCount > 0 || mathImageCount > 0) {
         const parts: string[] = [];
+        if (wordImageCount > 0) parts.push(`${wordImageCount} gambar Word`);
         if (tableImageCount > 0) parts.push(`${tableImageCount} gambar tabel`);
         if (mathImageCount > 0) parts.push(`${mathImageCount} gambar rumus`);
         showToast(
@@ -553,7 +642,7 @@ export default function App() {
     if (convertedQuestions.length === 0 || isExportingQuiz) return;
     setIsExportingQuiz(true);
     try {
-      const { filename, questionCount, formattedSlideCount } =
+      const { filename, questionCount, formattedSlideCount, embeddedImageCount } =
         await exportRichQuizToISpringQuiz(
           convertedQuestions,
           mathExportMode,
@@ -564,16 +653,46 @@ export default function App() {
       const incompleteWarn = hasWarning
         ? ` Catatan: ${answerAnalysis.incompleteCount} soal masih memiliki jawaban/kunci kosong.`
         : '';
+      const detailParts: string[] = [`${questionCount} soal`];
+      if (formattedSlideCount > 0) {
+        detailParts.push(`${formattedSlideCount} soal berformat Bold/Italic/Underline`);
+      }
+      if (embeddedImageCount > 0) {
+        detailParts.push(`${embeddedImageCount} gambar disematkan`);
+      }
       showToast(
-        formattedSlideCount > 0
-          ? `File "${filename}" (${questionCount} soal, ${formattedSlideCount} soal berformat Bold/Italic/Underline) siap dibuka di iSpring QuizMaker!${incompleteWarn}`
-          : `File "${filename}" (${questionCount} soal) diunduh & siap dibuka di iSpring QuizMaker.${incompleteWarn}`,
+        `File "${filename}" (${detailParts.join(', ')}) siap dibuka di iSpring QuizMaker!${incompleteWarn}`,
         hasWarning ? 'info' : 'success'
       );
     } catch (err: any) {
       showToast('Gagal membuat file .quiz: ' + (err?.message || 'Unknown error'), 'error');
     } finally {
       setIsExportingQuiz(false);
+    }
+  };
+
+  const handleDownloadAllWordImages = async () => {
+    if (isExportingWordImages) return;
+    setIsExportingWordImages(true);
+    try {
+      const { count, filename } = await downloadAllWordImages(convertedQuestions);
+      showToast(
+        `${count} gambar Word berhasil diunduh (${filename}). Simpan satu folder dengan file Excel sebelum impor ke iSpring.`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengunduh gambar Word', 'error');
+    } finally {
+      setIsExportingWordImages(false);
+    }
+  };
+
+  const handleDownloadSingleWordImage = async (q: RichQuestion, questionIdx: number) => {
+    try {
+      const filename = await downloadQuestionWordImage(q.questionImages, questionIdx);
+      showToast(`Gambar soal "${filename}" diunduh!`, 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengunduh gambar soal', 'error');
     }
   };
 
@@ -695,6 +814,7 @@ export default function App() {
         (q) =>
           questionHasRichFormatting(q) ||
           questionHasTable(q) ||
+          questionHasImage(q) ||
           questionHasMath(q)
       ).length,
     [convertedQuestions, dollarSyntax]
@@ -702,6 +822,11 @@ export default function App() {
 
   const tableQuestionsCount = useMemo(
     () => convertedQuestions.filter(questionHasTable).length,
+    [convertedQuestions]
+  );
+
+  const wordImageQuestionsCount = useMemo(
+    () => convertedQuestions.filter(questionHasImage).length,
     [convertedQuestions]
   );
 
@@ -782,6 +907,7 @@ export default function App() {
           return (
             questionHasRichFormatting(q) ||
             questionHasTable(q) ||
+            questionHasImage(q) ||
             questionHasMath(q)
           );
         }
@@ -795,23 +921,63 @@ export default function App() {
       <header className="bg-white border-b border-slate-200 py-4 px-6 sticky top-0 z-10 shadow-sm">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-3">
-            <div className="bg-indigo-600 text-white p-2 rounded-xl shadow-md shadow-indigo-100">
+            <div className="bg-indigo-600 text-white p-2 rounded-xl shadow-md shadow-indigo-100 shrink-0">
               <FileSpreadsheet className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">iSpring Quiz Converter Masansa</h1>
-              <p className="text-xs text-slate-500 font-medium">Ubah Soal Teks Menjadi File .quiz & Template Excel iSpring Suite</p>
+              <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight">
+                iSpring Quiz Converter ms. Reyhan lohyaa
+              </h1>
+              <p className="text-xs text-slate-500 font-medium">
+                Ubah Soal Teks Menjadi File .quiz &amp; Template Excel iSpring Suite
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            Sistem Siap Digunakan
+          <div className="flex items-center gap-2.5 shrink-0">
+            {adminToken ? (
+              <>
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg whitespace-nowrap shrink-0">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Admin: {adminUsername || 'admin'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleAdminLogout}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Keluar
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setIsLoginModalOpen(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 px-3.5 py-2 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Lock className="w-3.5 h-3.5 text-indigo-600" />
+                Login Admin
+              </button>
+            )}
           </div>
         </div>
       </header>
 
       {/* Main Content */}
       <main className="flex-grow max-w-7xl w-full mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+        {/* Owner Photo Frame & Custom Quote */}
+        <div className="lg:col-span-12">
+          <OwnerSpotlight
+            profile={ownerProfile}
+            isAdmin={Boolean(adminToken)}
+            adminToken={adminToken}
+            onProfileUpdated={setOwnerProfile}
+            onOpenLogin={() => setIsLoginModalOpen(true)}
+            onSessionExpired={handleSessionExpired}
+            onNotify={showToast}
+          />
+        </div>
 
         {/* Left Column: Input Form (7 cols) */}
         <div className="lg:col-span-7 flex flex-col gap-6">
@@ -879,7 +1045,7 @@ export default function App() {
                   <p className="font-bold mb-1 text-indigo-900">Cara Kerja Mode Otomatis & Impor Template Word (.docx):</p>
                   <ul className="list-disc pl-4 space-y-1">
                     <li>Di file Word (<b>.docx</b>), beri penanda baris <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">Soal</code> di atas daftar soal dan <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">Kunci Jawaban</code> sebelum daftar kunci — saat diimpor, keduanya otomatis diekstrak & dikonversi sekaligus!</li>
-                    <li>Format <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, dan <b>Tabel</b> (termasuk tabel kunci jawaban) otomatis terbaca & dipertahankan.</li>
+                    <li>Format <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, <b>Gambar</b>, dan <b>Tabel</b> (termasuk tabel kunci jawaban) otomatis terbaca &amp; dipertahankan.</li>
                     <li>Bisa juga tempel manual dari Word / Google Docs, lalu isi kunci (contoh: <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">1. A</code> atau <code className="bg-indigo-100 px-1 rounded text-indigo-900 font-bold">2. A,B</code> untuk <b>MR</b>).</li>
                   </ul>
                 </div>
@@ -990,6 +1156,19 @@ export default function App() {
                 2. Hasil ({convertedQuestions.length} Soal)
               </h2>
               <div className="flex flex-wrap items-center gap-2">
+                {wordImageQuestionsCount > 0 && (
+                  <button
+                    onClick={handleDownloadAllWordImages}
+                    disabled={isExportingWordImages}
+                    className="bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-2 px-3 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                    title="Unduh semua gambar Word untuk ditaruh satu folder dengan Excel saat impor ke iSpring"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5" />
+                    {isExportingWordImages
+                      ? 'Membuat...'
+                      : `Unduh Gambar Word (${wordImageQuestionsCount})`}
+                  </button>
+                )}
                 {tableQuestionsCount > 0 && tableExportMode === 'image' && (
                   <button
                     onClick={handleDownloadAllTables}
@@ -1035,6 +1214,18 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {convertedQuestions.length > 0 && wordImageQuestionsCount > 0 && (
+              <div className="mb-3 p-3 bg-emerald-50/90 border border-emerald-200 rounded-xl text-[11px] text-emerald-950 leading-relaxed space-y-1">
+                <p className="font-bold flex items-center gap-1.5 text-emerald-900">
+                  <ImageIcon className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  Terdeteksi {wordImageQuestionsCount} Soal Bergambar dari Word:
+                </p>
+                <p>
+                  Gambar sudah siap disematkan otomatis ke dalam file <b>.quiz</b> (folder <code>images/</code> iSpring). Jika mengekspor lewat <b>Unduh Excel</b>, klik juga <b>Unduh Gambar Word ({wordImageQuestionsCount})</b> dan taruh dalam satu folder yang sama dengan Excel.
+                </p>
+              </div>
+            )}
 
             {/* Math Engine & Export Controls when math exists */}
             {convertedQuestions.length > 0 && mathQuestionsCount > 0 && (
@@ -1465,6 +1656,7 @@ export default function App() {
                     const qTable = getFirstQuestionTable(q);
                     const qMathSegments = extractMathSegmentsFromQuestion(q, dollarSyntax);
                     const qHasMath = qMathSegments.length > 0;
+                    const qHasWordImage = q.questionImages.length > 0;
                     const qFormatTags = [
                       ...getFormattingSummary(q.questionNodes),
                       ...(qHasMath || q.answers.some((a) => hasMathInRichText(a.richText, dollarSyntax))
@@ -1475,11 +1667,13 @@ export default function App() {
                     const qMmlCopyId = `mml-${originalIndex}`;
                     const effectiveImage =
                       q.image ||
-                      (qTable && tableExportMode === 'image'
-                        ? getTableImageFilename(originalIndex)
-                        : qHasMath && mathExportMode === 'image'
-                          ? getMathImageFilename(originalIndex)
-                          : '');
+                      (qHasWordImage
+                        ? getWordImageFilename(originalIndex, q.questionImages)
+                        : qTable && tableExportMode === 'image'
+                          ? getTableImageFilename(originalIndex)
+                          : qHasMath && mathExportMode === 'image'
+                            ? getMathImageFilename(originalIndex)
+                            : '');
 
                     const displayNum = q.sourceNumber ?? originalIndex + 1;
                     const isHighlighted = highlightedQuestionIdx === originalIndex;
@@ -1510,6 +1704,17 @@ export default function App() {
                           </div>
 
                           <div className="flex flex-wrap items-center gap-1.5">
+                            {qHasWordImage && (
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadSingleWordImage(q, originalIndex)}
+                                className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-amber-200 bg-amber-50/80 text-amber-800 hover:bg-amber-100 flex items-center gap-1 transition-all cursor-pointer"
+                                title="Unduh gambar soal dari Word"
+                              >
+                                <Download className="w-3 h-3" />
+                                Gambar
+                              </button>
+                            )}
                             {qTable && (
                               <button
                                 type="button"
@@ -1607,7 +1812,8 @@ export default function App() {
                             {q.answers.map((ans, optIdx) => {
                               const char = String.fromCharCode(97 + optIdx);
                               const ansHasFormat = hasRichFormatting(ans.richText);
-                              const isOptionEmpty = ans.text.trim() === '';
+                              const ansHasImages = Boolean(ans.images && ans.images.length > 0);
+                              const isOptionEmpty = ans.text.trim() === '' && !ansHasImages;
                               const ansCopyId = `a-${originalIndex}-${optIdx}`;
                               return (
                                 <div
@@ -1624,17 +1830,30 @@ export default function App() {
                                     <span className="uppercase font-bold text-[10px] bg-slate-200/60 text-slate-600 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
                                       {char}
                                     </span>
-                                    <span className="leading-relaxed break-words">
+                                    <span className="leading-relaxed break-words space-y-1.5">
                                       {isOptionEmpty ? (
                                         <span className="italic text-amber-700">
                                           (Teks opsi {char.toUpperCase()} masih kosong)
                                         </span>
                                       ) : (
-                                        <RichTextRenderer
-                                          lines={ans.richText}
-                                          mathEngine={mathEngine}
-                                          dollarSyntax={dollarSyntax}
-                                        />
+                                        <>
+                                          {ans.text.trim() !== '' && (
+                                            <RichTextRenderer
+                                              lines={ans.richText}
+                                              mathEngine={mathEngine}
+                                              dollarSyntax={dollarSyntax}
+                                            />
+                                          )}
+                                          {ans.images?.map((img, imIdx) => (
+                                            <img
+                                              key={imIdx}
+                                              src={img.dataUrl}
+                                              alt={img.alt || `Gambar opsi ${char.toUpperCase()}`}
+                                              referrerPolicy="no-referrer"
+                                              className="block max-h-36 max-w-full rounded border border-slate-200 bg-white object-contain"
+                                            />
+                                          ))}
+                                        </>
                                       )}
                                     </span>
                                   </span>
@@ -1718,10 +1937,17 @@ export default function App() {
       {/* Footer */}
       <footer className="bg-white border-t border-slate-200 py-6 text-center text-xs text-slate-500 mt-auto">
         <div className="max-w-7xl mx-auto px-4">
-          <p>© 2026 iSpring Quiz Converter. 100% Kompatibel dengan iSpring Suite QuizMaker.</p>
-          <p className="mt-2 font-medium text-slate-600">Made by Reyhan Ardisola</p>
+          <p>© 2026 iSpring Quiz Converter ms. Reyhan lohyaa. 100% Kompatibel dengan iSpring Suite QuizMaker.</p>
+          <p className="mt-2 font-medium text-slate-600">Made by ms. Reyhan lohyaa</p>
         </div>
       </footer>
+
+      {/* Admin Login Modal */}
+      <AdminLoginModal
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
+        onSuccess={handleAdminLoginSuccess}
+      />
 
       {/* Toast */}
       <div className={`fixed bottom-6 right-6 transform ${toast.visible ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0 pointer-events-none'} bg-slate-950 text-white px-5 py-3.5 rounded-xl shadow-xl flex items-center gap-3 transition-all duration-300 z-50 text-sm max-w-md`}>

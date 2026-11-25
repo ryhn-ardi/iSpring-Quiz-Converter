@@ -1,0 +1,23 @@
+{
+    "storageInfo": "[{\"name\":\"images\\\/img-b6f066817950309f186cce862602de6c7d82e60e.jpeg\",\"originalHash\":\"b6f066817950309f186cce862602de6c7d82e60e\",\"hash\":\"b6f066817950309f186cce862602de6c7d82e60e\"}]",
+    "title": "sampel ispring gambar",
+    "courseLessonTitle": "",
+    "courseDescription": "",
+    "courseAuthor": "",
+    "courseTags": "",
+    "courseGuid": "E1F9DF9B-9CB6-4D3E-AC9F-C42265A082AA",
+    "lastPublishingPath": "",
+    "publishSettings": "",
+    "lmsPublishOptions": "{\"apiStandard\":\"AS_SCORM12\",\"reportStatuses\":\"RS_PASSED_FAILED\",\"useXAPIEndpoint\":\"T_FALSE\"}",
+    "onlinePublishOptions": "{\"ispringCloud\":{},\"ispringLms\":{},\"ispringStudio\":{}}",
+    "quiz": {
+        "version": "16",
+        "compatible": "2",
+        "showAllQuestions": "false",
+        "gradeInfo": {
+            "maxScore": "10",
+            "passingScore": "800",
+            "isPassingScorePercent": "true"
+        }
+    }
+}

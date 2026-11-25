@@ -25,6 +25,8 @@ export type DocxImportResult = {
   hasSoalHeader: boolean;
   hasKeysSection: boolean;
   tableCount: number;
+  imageCount: number;
+  unsupportedImageCount: number;
 };
 
 function isSoalHeaderNode(node: RichContentNode): boolean {
@@ -96,6 +98,9 @@ export function extractKeysTextFromNodes(keyNodes: RichContentNode[]): string {
       outLines.push(...extractKeysFromTable(node));
       continue;
     }
+    if (node.type !== 'line') {
+      continue;
+    }
 
     const plain = richLineToPlain(node.spans).trim();
     if (!plain) continue;
@@ -113,7 +118,8 @@ export function extractKeysTextFromNodes(keyNodes: RichContentNode[]): string {
 }
 
 export function splitDocxNodesIntoQuestionsAndKeys(
-  nodes: RichContentNode[]
+  nodes: RichContentNode[],
+  unsupportedImageCount = 0
 ): DocxImportResult {
   // Use the last standalone "Kunci Jawaban" heading so questions aren't truncated prematurely
   let kunciHeaderIdx = -1;
@@ -141,6 +147,7 @@ export function splitDocxNodesIntoQuestionsAndKeys(
     kunciHeaderIdx !== -1 ? trimRichNodes(nodes.slice(kunciHeaderIdx + 1)) : [];
   const keysText = extractKeysTextFromNodes(keyNodes);
   const tableCount = questionNodes.filter((n) => n.type === 'table').length;
+  const imageCount = questionNodes.filter((n) => n.type === 'image').length;
 
   return {
     questionNodes,
@@ -148,6 +155,8 @@ export function splitDocxNodesIntoQuestionsAndKeys(
     hasSoalHeader: soalHeaderIdx !== -1,
     hasKeysSection: kunciHeaderIdx !== -1,
     tableCount,
+    imageCount,
+    unsupportedImageCount,
   };
 }
 
@@ -157,8 +166,12 @@ export async function parseDocxFile(file: File): Promise<DocxImportResult> {
     { arrayBuffer },
     { styleMap: ['u => u'] }
   );
+  const unsupportedMatches = result.value.match(
+    /src=["']data:image\/(?:x-emf|x-wmf|emf|wmf|tiff)/gi
+  );
+  const unsupportedImageCount = unsupportedMatches ? unsupportedMatches.length : 0;
   const nodes = htmlToRichNodes(result.value);
-  return splitDocxNodesIntoQuestionsAndKeys(nodes);
+  return splitDocxNodesIntoQuestionsAndKeys(nodes, unsupportedImageCount);
 }
 
 function xmlEscape(str: string): string {

@@ -18,9 +18,41 @@ export type RichTable = {
   rows: RichTableCell[][];
 };
 
+export type RichImage = {
+  type: 'image';
+  dataUrl: string;
+  mimeType: string;
+  alt?: string;
+};
+
 export type RichContentNode =
   | { type: 'line'; spans: RichLine }
-  | RichTable;
+  | RichTable
+  | RichImage;
+
+const SAFE_IMAGE_DATA_URL_REGEX =
+  /^data:(image\/(?:png|jpeg|jpg|gif|webp|bmp));base64,([A-Za-z0-9+/=]+)$/i;
+
+export function sanitizeImageDataUrl(
+  rawSrc: string | null | undefined
+): { dataUrl: string; mimeType: string } | null {
+  if (!rawSrc) return null;
+  const trimmed = rawSrc.trim();
+  const commaIdx = trimmed.indexOf(',');
+  if (commaIdx === -1) return null;
+  const header = trimmed.slice(0, commaIdx);
+  const payload = trimmed.slice(commaIdx + 1).replace(/\s+/g, '');
+  const normalized = `${header},${payload}`;
+  const match = normalized.match(SAFE_IMAGE_DATA_URL_REGEX);
+  if (!match || normalized.length > 25 * 1024 * 1024) {
+    return null;
+  }
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase();
+  return {
+    dataUrl: `data:${mimeType};base64,${match[2]}`,
+    mimeType,
+  };
+}
 
 type FormatFlags = {
   bold: boolean;
@@ -70,6 +102,7 @@ export function hasRichFormatting(lines: RichText): boolean {
 export function nodesHaveRichFormatting(nodes: RichContentNode[]): boolean {
   return nodes.some((node) => {
     if (node.type === 'line') return hasRichFormatting([node.spans]);
+    if (node.type === 'image') return false;
     return node.rows.some((row) => row.some((cell) => hasRichFormatting(cell.lines)));
   });
 }
@@ -78,11 +111,16 @@ export function nodesHaveTable(nodes: RichContentNode[]): boolean {
   return nodes.some((node) => node.type === 'table');
 }
 
+export function nodesHaveImage(nodes: RichContentNode[]): boolean {
+  return nodes.some((node) => node.type === 'image');
+}
+
 export function getFormattingSummary(nodes: RichContentNode[]): string[] {
   let bold = false;
   let italic = false;
   let underline = false;
   let hasTable = false;
+  let hasImage = false;
 
   const scanLines = (lines: RichText) => {
     for (const line of lines) {
@@ -97,6 +135,8 @@ export function getFormattingSummary(nodes: RichContentNode[]): string[] {
   for (const node of nodes) {
     if (node.type === 'line') {
       scanLines([node.spans]);
+    } else if (node.type === 'image') {
+      hasImage = true;
     } else {
       hasTable = true;
       for (const row of node.rows) {
@@ -112,6 +152,7 @@ export function getFormattingSummary(nodes: RichContentNode[]): string[] {
   if (italic) tags.push('Italic');
   if (underline) tags.push('Underline');
   if (hasTable) tags.push('Tabel');
+  if (hasImage) tags.push('Gambar');
   return tags;
 }
 
@@ -163,12 +204,24 @@ export function tableToHtml(table: RichTable, withInlineStyles = false): string 
   return `<table${tableStyle}><tbody>${rowsHtml}</tbody></table>`;
 }
 
+export function imageToHtml(img: RichImage, withInlineStyles = false): string {
+  const safe = sanitizeImageDataUrl(img.dataUrl);
+  if (!safe) return '';
+  const altAttr = escapeHtml(img.alt || 'Gambar soal');
+  const styleAttr = withInlineStyles
+    ? ' style="max-width:100%;height:auto;display:block;margin:6px 0;"'
+    : '';
+  return `<img src="${escapeHtml(safe.dataUrl)}" alt="${altAttr}"${styleAttr}>`;
+}
+
 export function richNodesToHtml(nodes: RichContentNode[], withInlineTableStyles = false): string {
   return nodes
     .map((node) => {
       if (node.type === 'line') return richLineToHtml(node.spans);
+      if (node.type === 'image') return imageToHtml(node, withInlineTableStyles);
       return tableToHtml(node, withInlineTableStyles);
     })
+    .filter((part) => part !== '')
     .join('<br>');
 }
 
@@ -179,6 +232,10 @@ export function richNodesToEditorHtml(nodes: RichContentNode[]): string {
       if (node.type === 'line') {
         const inner = richLineToHtml(node.spans);
         return `<div>${inner || '<br>'}</div>`;
+      }
+      if (node.type === 'image') {
+        const imgHtml = imageToHtml(node, false);
+        return imgHtml ? `<div>${imgHtml}</div>` : '';
       }
       return tableToHtml(node, false);
     })
@@ -226,7 +283,7 @@ export function richNodesToRichText(
   for (const node of nodes) {
     if (node.type === 'line') {
       out.push(node.spans);
-    } else if (includeTablesAsText) {
+    } else if (node.type === 'table' && includeTablesAsText) {
       out.push(...tableToPlainLines(node));
     }
   }
@@ -610,6 +667,23 @@ export function htmlToRichNodes(html: string): RichContentNode[] {
       const parsedTable = parseTableElement(el);
       if (parsedTable) {
         nodes.push(parsedTable);
+      }
+      return;
+    }
+
+    if (tag === 'IMG') {
+      const safeImg = sanitizeImageDataUrl(el.getAttribute('src'));
+      if (safeImg) {
+        if (currentLine.length > 0) {
+          flushLine(false);
+        }
+        const alt = (el.getAttribute('alt') || '').trim();
+        nodes.push({
+          type: 'image',
+          dataUrl: safeImg.dataUrl,
+          mimeType: safeImg.mimeType,
+          ...(alt ? { alt } : {}),
+        });
       }
       return;
     }

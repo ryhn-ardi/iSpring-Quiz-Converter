@@ -97,7 +97,7 @@ export function extractMathSegmentsFromQuestion(
   for (const node of q.questionNodes) {
     if (node.type === 'line') {
       scanPlain(richLineToPlain(node.spans));
-    } else {
+    } else if (node.type === 'table') {
       for (const row of node.rows) {
         for (const cell of row) {
           scanPlain(richTextToPlain(cell.lines));

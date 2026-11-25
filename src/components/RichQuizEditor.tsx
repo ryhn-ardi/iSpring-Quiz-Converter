@@ -14,6 +14,7 @@ import {
   htmlToRichNodes,
   richNodesToEditorHtml,
   richNodesToHtml,
+  sanitizeImageDataUrl,
 } from '../utils/richText';
 import { MathEquationModal } from './MathEquationModal';
 import { MathRenderEngine } from '../utils/mathEngine';
@@ -51,7 +52,9 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
     !valueHtml ||
     valueHtml === '<br>' ||
     valueHtml === '<div><br></div>' ||
-    (valueHtml.replace(/<[^>]*>/g, '').trim() === '' && !valueHtml.includes('<table'));
+    (valueHtml.replace(/<[^>]*>/g, '').trim() === '' &&
+      !valueHtml.includes('<table') &&
+      !valueHtml.includes('<img'));
 
   useEffect(() => {
     const el = editorRef.current;
@@ -172,6 +175,31 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
     if (cleanHtmlToInsert) {
       document.execCommand('insertHTML', false, cleanHtmlToInsert);
       emitChange();
+      return;
+    }
+
+    const files = Array.from(clipboard.files ?? []) as File[];
+    const imageFile = files.find((f) =>
+      /^image\/(png|jpeg|jpg|gif|webp|bmp)$/i.test(f.type)
+    );
+    if (imageFile) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const safe =
+          typeof reader.result === 'string'
+            ? sanitizeImageDataUrl(reader.result)
+            : null;
+        if (safe && editorRef.current) {
+          editorRef.current.focus();
+          document.execCommand(
+            'insertHTML',
+            false,
+            `<div><img src="${escapeHtml(safe.dataUrl)}" alt="Gambar soal"></div>`
+          );
+          emitChange();
+        }
+      };
+      reader.readAsDataURL(imageFile);
     }
   };
 
@@ -201,9 +229,13 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
       onChangeHtml(editorHtml);
 
       const tableCount = richNodes.filter((n) => n.type === 'table').length;
+      const imageCount = richNodes.filter((n) => n.type === 'image').length;
+      const extras: string[] = [];
+      if (tableCount > 0) extras.push(`${tableCount} tabel`);
+      if (imageCount > 0) extras.push(`${imageCount} gambar`);
       onNotify?.(
-        tableCount > 0
-          ? `Berhasil mengimpor "${file.name}" (${tableCount} tabel & format teks terjaga).`
+        extras.length > 0
+          ? `Berhasil mengimpor "${file.name}" (${extras.join(' & ')} terjaga).`
           : `Berhasil mengimpor "${file.name}" beserta format Bold, Italic, dan Underline.`,
         'success'
       );
@@ -337,7 +369,7 @@ export const RichQuizEditor: React.FC<RichQuizEditorProps> = ({
           onPaste={handlePaste}
           onKeyUp={refreshActiveFormats}
           onMouseUp={refreshActiveFormats}
-          className="w-full min-h-[256px] max-h-[380px] overflow-y-auto p-4 text-sm font-mono leading-relaxed text-slate-800 focus:outline-none [&_b]:font-bold [&_strong]:font-bold [&_i]:italic [&_em]:italic [&_u]:underline [&_table]:w-full [&_table]:border-collapse [&_table]:my-2 [&_table]:text-xs [&_td]:border [&_td]:border-slate-300 [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_th]:border [&_th]:border-slate-300 [&_th]:bg-slate-100 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:font-bold [&_th]:text-left"
+          className="w-full min-h-[256px] max-h-[380px] overflow-y-auto p-4 text-sm font-mono leading-relaxed text-slate-800 focus:outline-none [&_b]:font-bold [&_strong]:font-bold [&_i]:italic [&_em]:italic [&_u]:underline [&_table]:w-full [&_table]:border-collapse [&_table]:my-2 [&_table]:text-xs [&_td]:border [&_td]:border-slate-300 [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_th]:border [&_th]:border-slate-300 [&_th]:bg-slate-100 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:font-bold [&_th]:text-left [&_img]:max-w-full [&_img]:max-h-56 [&_img]:rounded-lg [&_img]:my-2 [&_img]:border [&_img]:border-slate-200 [&_img]:block"
         />
       </div>
 

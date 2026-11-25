@@ -1,8 +1,9 @@
 import {
   RichContentNode,
-  RichLine,
+  RichImage,
   RichTable,
   RichText,
+  nodesHaveImage,
   nodesHaveRichFormatting,
   nodesHaveTable,
   removeRegexFromRichNodes,
@@ -21,6 +22,7 @@ export type RichAnswer = {
   text: string;
   richText: RichText;
   isCorrect: boolean;
+  images?: RichImage[];
 };
 
 export type RichQuestion = {
@@ -29,14 +31,20 @@ export type RichQuestion = {
   question: string;
   questionRich: RichText;
   questionNodes: RichContentNode[];
+  questionImages: RichImage[];
   answers: RichAnswer[];
   points: number;
   image?: string;
 };
 
+type ParsedOptionItem = {
+  lines: RichText;
+  images: RichImage[];
+};
+
 type RichBlock = {
   qNodes: RichContentNode[];
-  aLines: RichText[];
+  aItems: ParsedOptionItem[];
 };
 
 const isOptionPlain = (line: string) => {
@@ -57,14 +65,23 @@ const isNumberingPlain = (line: string) => {
 export function parseRichNodeBlocks(nodes: RichContentNode[]): RichBlock[] {
   const parsedBlocks: RichBlock[] = [];
   let currentQNodes: RichContentNode[] = [];
-  let currentALines: RichText[] = [];
+  let currentAItems: ParsedOptionItem[] = [];
 
   for (const node of nodes) {
     if (node.type === 'table') {
-      if (currentALines.length > 0) {
-        parsedBlocks.push({ qNodes: currentQNodes, aLines: currentALines });
+      if (currentAItems.length > 0) {
+        parsedBlocks.push({ qNodes: currentQNodes, aItems: currentAItems });
         currentQNodes = [node];
-        currentALines = [];
+        currentAItems = [];
+      } else {
+        currentQNodes.push(node);
+      }
+      continue;
+    }
+
+    if (node.type === 'image') {
+      if (currentAItems.length > 0) {
+        currentAItems[currentAItems.length - 1].images.push(node);
       } else {
         currentQNodes.push(node);
       }
@@ -76,15 +93,15 @@ export function parseRichNodeBlocks(nodes: RichContentNode[]): RichBlock[] {
 
     const plain = richLineToPlain(trimmedLine);
     if (isOptionPlain(plain)) {
-      currentALines.push([trimmedLine]);
+      currentAItems.push({ lines: [trimmedLine], images: [] });
     } else {
-      if (currentALines.length > 0) {
+      if (currentAItems.length > 0) {
         if (isNumberingPlain(plain)) {
-          parsedBlocks.push({ qNodes: currentQNodes, aLines: currentALines });
+          parsedBlocks.push({ qNodes: currentQNodes, aItems: currentAItems });
           currentQNodes = [{ type: 'line', spans: trimmedLine }];
-          currentALines = [];
+          currentAItems = [];
         } else {
-          currentALines[currentALines.length - 1].push(trimmedLine);
+          currentAItems[currentAItems.length - 1].lines.push(trimmedLine);
         }
       } else {
         currentQNodes.push({ type: 'line', spans: trimmedLine });
@@ -92,8 +109,8 @@ export function parseRichNodeBlocks(nodes: RichContentNode[]): RichBlock[] {
     }
   }
 
-  if (currentQNodes.length > 0 || currentALines.length > 0) {
-    parsedBlocks.push({ qNodes: currentQNodes, aLines: currentALines });
+  if (currentQNodes.length > 0 || currentAItems.length > 0) {
+    parsedBlocks.push({ qNodes: currentQNodes, aItems: currentAItems });
   }
 
   return parsedBlocks;
@@ -103,7 +120,7 @@ function finalizeQuestionNodes(qNodesInput: RichContentNode[]): {
   cleanQuestionNodes: RichContentNode[];
   qNum: number | null;
 } {
-  let qNodes = [...qNodesInput];
+  const qNodes = [...qNodesInput];
   if (qNodes.length === 0) {
     return { cleanQuestionNodes: [], qNum: null };
   }
@@ -134,16 +151,22 @@ function finalizeQuestionNodes(qNodesInput: RichContentNode[]): {
   };
 }
 
+function hasAnyRichNodeContent(nodes: RichContentNode[]): boolean {
+  return nodes.some(
+    (n) =>
+      n.type === 'table' ||
+      n.type === 'image' ||
+      richLineToPlain(n.spans).trim() !== ''
+  );
+}
+
 export function convertAutoRich(
   questionNodesInput: RichContentNode[],
   keysText: string,
   defaultPoints: number
 ): RichQuestion[] {
   const kText = keysText.trim();
-  const hasAnyContent = questionNodesInput.some(
-    (n) => n.type === 'table' || richLineToPlain(n.spans).trim() !== ''
-  );
-  if (!hasAnyContent) {
+  if (!hasAnyRichNodeContent(questionNodesInput)) {
     throw new Error('Kolom daftar soal wajib diisi terlebih dahulu!');
   }
 
@@ -177,10 +200,15 @@ export function convertAutoRich(
 
   parsedBlocks.forEach((block, blockIdx) => {
     let qNodes = [...block.qNodes];
-    const aLines = [...block.aLines];
-    if (qNodes.length === 0 && aLines.length > 0) {
-      const fallback = aLines.shift() || [];
-      qNodes = fallback.map((spans) => ({ type: 'line', spans }));
+    const aItems = [...block.aItems];
+    if (qNodes.length === 0 && aItems.length > 0) {
+      const fallback = aItems.shift();
+      if (fallback) {
+        qNodes = [
+          ...fallback.lines.map((spans) => ({ type: 'line' as const, spans })),
+          ...fallback.images,
+        ];
+      }
     }
     if (qNodes.length === 0) return;
 
@@ -202,8 +230,13 @@ export function convertAutoRich(
       );
     }
 
+    const questionImages = cleanQuestionNodes.filter(
+      (n): n is RichImage => n.type === 'image'
+    );
+
     const answers: RichAnswer[] = [];
-    aLines.forEach((ansRichLines) => {
+    aItems.forEach((ansItem) => {
+      const ansRichLines = ansItem.lines;
       if (ansRichLines.length === 0) return;
       const firstLinePlain = richLineToPlain(ansRichLines[0]);
       const letterMatch = firstLinePlain.match(/^(?:\*|\[x\]\s*)?([a-eA-E])/i);
@@ -225,6 +258,7 @@ export function convertAutoRich(
         text: richTextToPlain(cleanAnsRich),
         richText: cleanAnsRich,
         isCorrect,
+        ...(ansItem.images.length > 0 ? { images: ansItem.images } : {}),
       });
     });
 
@@ -237,6 +271,7 @@ export function convertAutoRich(
       question: richTextToPlain(questionRich),
       questionRich,
       questionNodes: cleanQuestionNodes,
+      questionImages,
       answers,
       points: defaultPoints,
       image,
@@ -254,10 +289,7 @@ export function convertRuleRich(
   ruleNodesInput: RichContentNode[],
   defaultPoints: number
 ): RichQuestion[] {
-  const hasAnyContent = ruleNodesInput.some(
-    (n) => n.type === 'table' || richLineToPlain(n.spans).trim() !== ''
-  );
-  if (!hasAnyContent) {
+  if (!hasAnyRichNodeContent(ruleNodesInput)) {
     throw new Error('Masukkan teks soal manual terlebih dahulu!');
   }
 
@@ -266,10 +298,15 @@ export function convertRuleRich(
 
   parsedBlocks.forEach((block, blockIdx) => {
     let qNodes = [...block.qNodes];
-    const aLines = [...block.aLines];
-    if (qNodes.length === 0 && aLines.length > 0) {
-      const fallback = aLines.shift() || [];
-      qNodes = fallback.map((spans) => ({ type: 'line', spans }));
+    const aItems = [...block.aItems];
+    if (qNodes.length === 0 && aItems.length > 0) {
+      const fallback = aItems.shift();
+      if (fallback) {
+        qNodes = [
+          ...fallback.lines.map((spans) => ({ type: 'line' as const, spans })),
+          ...fallback.images,
+        ];
+      }
     }
     if (qNodes.length === 0) return;
 
@@ -290,8 +327,13 @@ export function convertRuleRich(
       );
     }
 
+    const questionImages = cleanQuestionNodes.filter(
+      (n): n is RichImage => n.type === 'image'
+    );
+
     const answers: RichAnswer[] = [];
-    aLines.forEach((ansRichLines) => {
+    aItems.forEach((ansItem) => {
+      const ansRichLines = ansItem.lines;
       if (ansRichLines.length === 0) return;
       const firstLinePlain = richLineToPlain(ansRichLines[0]);
       const isCorrect =
@@ -312,6 +354,7 @@ export function convertRuleRich(
         text: richTextToPlain(cleanAnsRich),
         richText: cleanAnsRich,
         isCorrect,
+        ...(ansItem.images.length > 0 ? { images: ansItem.images } : {}),
       });
     });
 
@@ -324,6 +367,7 @@ export function convertRuleRich(
       question: richTextToPlain(questionRich),
       questionRich,
       questionNodes: cleanQuestionNodes,
+      questionImages,
       answers,
       points: defaultPoints,
       image,
@@ -346,6 +390,10 @@ export function questionHasRichFormatting(q: RichQuestion): boolean {
 
 export function questionHasTable(q: RichQuestion): boolean {
   return nodesHaveTable(q.questionNodes);
+}
+
+export function questionHasImage(q: RichQuestion): boolean {
+  return nodesHaveImage(q.questionNodes) || q.questionImages.length > 0;
 }
 
 export function getFirstQuestionTable(q: RichQuestion): RichTable | undefined {

@@ -12,6 +12,8 @@ import {
   MathExportMode,
   replaceMathInRichTextWithUnicode,
 } from './mathEngine';
+import { renderQuestionWordImagesToBlob } from './wordImage';
+import { dataUrlToBlob } from './wordImage';
 
 const QUIZ_ASSET_PATHS = {
   metainfo: '/assets/aistudio/metainfo_9c2a0b05.json',
@@ -114,6 +116,21 @@ export type ISpringSlide = {
   };
   a: Record<string, unknown>;
   an: Record<string, unknown>;
+  at?: {
+    i?: {
+      i: string;
+      z: boolean;
+    };
+  };
+};
+
+export type ISpringImageAsset = {
+  id: string;
+  hash: string;
+  ext: 'png' | 'jpeg' | 'gif';
+  bytes: Uint8Array;
+  width: number;
+  height: number;
 };
 
 export type ISpringResultSlide = {
@@ -160,7 +177,12 @@ export type ISpringDocument = {
   s: Record<string, unknown>;
   sk: Record<string, unknown>;
   sm: unknown[];
-  A: Record<string, unknown>;
+  A: {
+    image?: Record<string, { src: string; width: number; height: number }>;
+    audio?: Record<string, unknown>;
+    video?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
 };
 
 type CachedTemplates = {
@@ -359,12 +381,226 @@ function applyResultSlideOptions(
   }
 }
 
+const SLIDE_PICTURE_OBJECT = {
+  tp: 'slidePicture',
+  I: 'Slide Picture 1',
+  k: true,
+  s: 'rectangle',
+  S: {
+    b: { f: 'none' },
+    s: { t: 'none', s: 1, d: '', c: 'butt', j: 'miter' },
+    a: { t: '', a: true },
+    t: { a: 'doNotAutofit', v: 'middle', w: true, l: 0, r: 0, t: 0, b: 0 },
+  },
+  b: 0.3,
+};
+
+async function computeSha1Hex(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await globalThis.crypto.subtle.digest('SHA-1', copy.buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function parseImageDimensionsFromBytes(
+  bytes: Uint8Array
+): { width: number; height: number } | null {
+  // PNG: 8-byte sig + 4-byte len + "IHDR" + 4-byte width + 4-byte height
+  if (
+    bytes.length >= 24 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return {
+      width: view.getUint32(16, false),
+      height: view.getUint32(20, false),
+    };
+  }
+
+  // GIF: "GIF87a" or "GIF89a" + LE uint16 width/height
+  if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return {
+      width: view.getUint16(6, true),
+      height: view.getUint16(8, true),
+    };
+  }
+
+  // JPEG: scan SOF0..SOF3 markers (0xFF 0xC0..0xC3)
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 8 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset++;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      if (marker === 0xd9 || marker === 0xda) break;
+      if (marker === 0x00 || (marker >= 0xd0 && marker <= 0xd8) || marker === 0x01) {
+        offset += 2;
+        continue;
+      }
+      const len = (bytes[offset + 2] << 8) | bytes[offset + 3];
+      if (
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf)
+      ) {
+        if (offset + 8 < bytes.length) {
+          const height = (bytes[offset + 5] << 8) | bytes[offset + 6];
+          const width = (bytes[offset + 7] << 8) | bytes[offset + 8];
+          return { width, height };
+        }
+      }
+      if (len < 2) break;
+      offset += 2 + len;
+    }
+  }
+
+  return null;
+}
+
+async function getImageDimensions(
+  blob: Blob,
+  bytes: Uint8Array
+): Promise<{ width: number; height: number }> {
+  const fromHeader = parseImageDimensionsFromBytes(bytes);
+  if (fromHeader && fromHeader.width > 0 && fromHeader.height > 0) {
+    return fromHeader;
+  }
+
+  if (typeof Image !== 'undefined' && typeof URL !== 'undefined') {
+    try {
+      const dims = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          resolve({
+            width: img.naturalWidth || img.width || 800,
+            height: img.naturalHeight || img.height || 600,
+          });
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error('Image load failed'));
+        };
+        img.src = url;
+      });
+      return dims;
+    } catch {
+      // Fallback below
+    }
+  }
+
+  return { width: 800, height: 600 };
+}
+
+function getISpringImageExt(mimeType: string): 'png' | 'jpeg' | 'gif' | null {
+  const lower = mimeType.toLowerCase();
+  if (lower === 'image/jpeg' || lower === 'image/jpg') return 'jpeg';
+  if (lower === 'image/png') return 'png';
+  if (lower === 'image/gif') return 'gif';
+  return null;
+}
+
+async function convertBlobToPngBlob(blob: Blob): Promise<Blob> {
+  if (typeof document === 'undefined' || typeof Image === 'undefined') {
+    throw new Error('Konversi gambar ke PNG memerlukan lingkungan browser.');
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Gagal memuat gambar untuk konversi PNG.'));
+      el.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth || img.width || 100;
+    canvas.height = img.naturalHeight || img.height || 100;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas 2D tidak tersedia.');
+    ctx.drawImage(img, 0, 0);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((out) => {
+        if (out) resolve(out);
+        else reject(new Error('Gagal mengonversi gambar ke PNG.'));
+      }, 'image/png');
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+export async function prepareQuizImageAssets(questions: RichQuestion[]): Promise<{
+  assets: ISpringImageAsset[];
+  questionAssetIds: Map<number, string>;
+}> {
+  const assets: ISpringImageAsset[] = [];
+  const byHash = new Map<string, ISpringImageAsset>();
+  const questionAssetIds = new Map<number, string>();
+  let nextId = 1;
+
+  for (let idx = 0; idx < questions.length; idx++) {
+    const q = questions[idx];
+    if (!q.questionImages || q.questionImages.length === 0) continue;
+
+    let blob: Blob;
+    let ext: 'png' | 'jpeg' | 'gif';
+
+    if (q.questionImages.length === 1) {
+      const nativeExt = getISpringImageExt(q.questionImages[0].mimeType);
+      const rawBlob = dataUrlToBlob(q.questionImages[0].dataUrl);
+      if (nativeExt) {
+        blob = rawBlob;
+        ext = nativeExt;
+      } else {
+        blob = await convertBlobToPngBlob(rawBlob);
+        ext = 'png';
+      }
+    } else {
+      blob = await renderQuestionWordImagesToBlob(q.questionImages);
+      ext = 'png';
+    }
+
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const hash = await computeSha1Hex(bytes);
+    let asset = byHash.get(hash);
+    if (!asset) {
+      const dims = await getImageDimensions(blob, bytes);
+      asset = {
+        id: String(nextId++),
+        hash,
+        ext,
+        bytes,
+        width: dims.width,
+        height: dims.height,
+      };
+      byHash.set(hash, asset);
+      assets.push(asset);
+    }
+
+    questionAssetIds.set(idx, asset.id);
+  }
+
+  return { assets, questionAssetIds };
+}
+
 export function buildISpringDocument(
   baseDocument: ISpringDocument,
   questions: RichQuestion[],
   mathMode: MathExportMode = 'unicode',
   dollarSyntax: DollarSyntaxMode = 'auto',
-  resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS
+  resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS,
+  imageAssets: ISpringImageAsset[] = [],
+  questionAssetIds?: Map<number, string>
 ): { document: ISpringDocument; formattedSlideCount: number; totalPoints: number } {
   const doc = cloneJson(baseDocument);
 
@@ -386,7 +622,7 @@ export function buildISpringDocument(
   let formattedSlideCount = 0;
   let totalPoints = 0;
 
-  const slides: ISpringSlide[] = questions.map((q) => {
+  const slides: ISpringSlide[] = questions.map((q, qIdx) => {
     const slide = cloneJson(templateSlide);
     const isMR = q.type === 'MR';
     slide.i = generateISpringId(usedIds);
@@ -465,6 +701,30 @@ export function buildISpringDocument(
       delete slide.s.al;
     }
 
+    const assetId = questionAssetIds?.get(qIdx);
+    if (assetId) {
+      slide.at = { i: { i: assetId, z: true } };
+      const aObj = slide.a as {
+        o?: Array<Record<string, unknown>>;
+        O?: { o?: string; [key: string]: unknown };
+        [key: string]: unknown;
+      };
+      if (Array.isArray(aObj.o)) {
+        aObj.o.push(cloneJson(SLIDE_PICTURE_OBJECT));
+      }
+      if (aObj.O && typeof aObj.O.o === 'string') {
+        try {
+          const parsedO = JSON.parse(aObj.O.o) as Record<string, number>;
+          parsedO.slidePicture = (parsedO.slidePicture ?? 1) + 1;
+          aObj.O.o = JSON.stringify(parsedO);
+        } catch {
+          // Leave existing string unchanged if unparseable
+        }
+      }
+    } else {
+      delete slide.at;
+    }
+
     return slide;
   });
 
@@ -472,6 +732,21 @@ export function buildISpringDocument(
   if (templateGroup.s && typeof templateGroup.s === 'object') {
     templateGroup.s.rs = slides.length;
   }
+
+  const imageMap: Record<string, { src: string; width: number; height: number }> = {};
+  for (const asset of imageAssets) {
+    imageMap[asset.id] = {
+      src: `storage://images/img-${asset.hash}.${asset.ext}`,
+      width: asset.width,
+      height: asset.height,
+    };
+  }
+  doc.A = {
+    ...doc.A,
+    image: imageMap,
+    audio: doc.A?.audio || {},
+    video: doc.A?.video || {},
+  };
 
   return { document: doc, formattedSlideCount, totalPoints };
 }
@@ -543,32 +818,43 @@ export async function exportRichQuizToISpringQuiz(
   filename: string;
   questionCount: number;
   formattedSlideCount: number;
+  embeddedImageCount: number;
 }> {
   if (questions.length === 0) {
     throw new Error('Tidak ada soal untuk diekspor ke file .quiz.');
   }
 
-  const { metainfoBytes, workspaceBytes, themeBytes, baseDocument } =
-    await loadQuizTemplates();
+  const [{ metainfoBytes, workspaceBytes, themeBytes, baseDocument }, { assets, questionAssetIds }] =
+    await Promise.all([loadQuizTemplates(), prepareQuizImageAssets(questions)]);
 
   const { document: generatedDoc, formattedSlideCount, totalPoints } = buildISpringDocument(
     baseDocument,
     questions,
     mathMode,
     dollarSyntax,
-    resultOptions
+    resultOptions,
+    assets,
+    questionAssetIds
   );
 
   let metainfoContent: Uint8Array | string = metainfoBytes;
   try {
     const metainfoText = new TextDecoder().decode(metainfoBytes);
     const metainfoObj = JSON.parse(metainfoText) as {
+      storageInfo?: string;
       quiz?: { gradeInfo?: { maxScore?: string } };
     };
     if (metainfoObj?.quiz?.gradeInfo) {
       metainfoObj.quiz.gradeInfo.maxScore = String(totalPoints);
-      metainfoContent = JSON.stringify(metainfoObj, null, 4).replace(/\n/g, '\r\n') + '\r\n';
     }
+    const storageInfoEntries = assets.map((asset) => ({
+      name: `images/img-${asset.hash}.${asset.ext}`,
+      originalHash: asset.hash,
+      hash: asset.hash,
+    }));
+    metainfoObj.storageInfo = JSON.stringify(storageInfoEntries).replace(/\//g, '\\/');
+    metainfoContent =
+      JSON.stringify(metainfoObj, null, 4).replace(/\//g, '\\/').replace(/\n/g, '\r\n') + '\r\n';
   } catch {
     metainfoContent = metainfoBytes;
   }
@@ -595,6 +881,14 @@ export async function exportRichQuizToISpringQuiz(
     dosPermissions: 0x20,
   });
 
+  for (const asset of assets) {
+    zip.file(`images/img-${asset.hash}.${asset.ext}`, asset.bytes, {
+      createFolders: false,
+      compression: 'STORE',
+      dosPermissions: 0x20,
+    });
+  }
+
   const rawZip = await zip.generateAsync({
     type: 'uint8array',
     platform: 'DOS',
@@ -609,5 +903,6 @@ export async function exportRichQuizToISpringQuiz(
     filename,
     questionCount: questions.length,
     formattedSlideCount,
+    embeddedImageCount: questionAssetIds.size,
   };
 }

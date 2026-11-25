@@ -231,9 +231,12 @@ export function hasMathInNodes(
         defaultDollarSyntax
       );
     }
-    return node.rows.some((row) =>
-      row.some((cell) => hasMathInRichText(cell.lines, defaultDollarSyntax))
-    );
+    if (node.type === 'table') {
+      return node.rows.some((row) =>
+        row.some((cell) => hasMathInRichText(cell.lines, defaultDollarSyntax))
+      );
+    }
+    return false;
   });
 }
 

@@ -45,7 +45,7 @@ export function analyzeQuizAnswers(questions: RichQuestion[]): QuizAnswerAnalysi
 
     const emptyOptionLetters: string[] = [];
     q.answers.forEach((ans, optIdx) => {
-      if (ans.text.trim() === '') {
+      if (ans.text.trim() === '' && (!ans.images || ans.images.length === 0)) {
         emptyOptionLetters.push(String.fromCharCode(65 + optIdx));
       }
     });

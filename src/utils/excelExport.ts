@@ -20,6 +20,7 @@ import {
   extractMathSegmentsFromQuestion,
   getMathImageFilename,
 } from './mathImage';
+import { getWordImageFilename } from './wordImage';
 
 export type TableExportMode = 'image' | 'text';
 
@@ -58,6 +59,7 @@ export async function exportRichQuizToExcel(
   formattedCount: number;
   tableImageCount: number;
   mathImageCount: number;
+  wordImageCount: number;
 }> {
   const headers = [
     'Question Type', 'Question Text', 'Image', 'Video', 'Audio',
@@ -70,6 +72,7 @@ export async function exportRichQuizToExcel(
   let tokenCounter = 0;
   let tableImageCount = 0;
   let mathImageCount = 0;
+  let wordImageCount = 0;
 
   const toCellValue = (rich: RichText): string => {
     if (!hasRichFormatting(rich)) {
@@ -100,7 +103,10 @@ export async function exportRichQuizToExcel(
     }
 
     let imageFile = q.image || '';
-    if (hasTable && tableMode === 'image' && !imageFile) {
+    if (q.questionImages.length > 0 && !imageFile) {
+      imageFile = getWordImageFilename(idx, q.questionImages);
+      wordImageCount++;
+    } else if (hasTable && tableMode === 'image' && !imageFile) {
       imageFile = getTableImageFilename(idx);
       tableImageCount++;
     } else if (hasQuestionMath && mathMode === 'image' && !imageFile) {
@@ -160,7 +166,7 @@ export async function exportRichQuizToExcel(
 
   if (richTokenMap.size === 0) {
     XLSX.writeFile(wb, filename);
-    return { filename, formattedCount: 0, tableImageCount, mathImageCount };
+    return { filename, formattedCount: 0, tableImageCount, mathImageCount, wordImageCount };
   }
 
   const rawBuffer = XLSX.write(wb, {
@@ -237,5 +243,5 @@ export async function exportRichQuizToExcel(
 
   triggerBlobDownload(outBlob, filename);
 
-  return { filename, formattedCount: richTokenMap.size, tableImageCount, mathImageCount };
+  return { filename, formattedCount: richTokenMap.size, tableImageCount, mathImageCount, wordImageCount };
 }
