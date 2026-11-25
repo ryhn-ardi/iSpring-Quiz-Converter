@@ -293,11 +293,11 @@ export function richTextToISpringParagraphs(lines: RichText): ISpringParagraph[]
     for (const span of line) {
       if (!span.text) continue;
       const tf = buildTextFormat(span);
-      const tokens = span.text.match(/[\p{L}\p{N}]+|[^\p{L}\p{N}]+/gu) ?? [span.text];
+      const tokens = span.text.match(/\p{L}+|[^\p{L}]+/gu) ?? [span.text];
 
       for (const tok of tokens) {
         if (!tok) continue;
-        const isWord = /^[\p{L}\p{N}]+$/u.test(tok);
+        const isWord = /^\p{L}+$/u.test(tok);
         runs.push({
           t: tok,
           ...(tf ? { tf: { ...tf } } : {}),
@@ -348,7 +348,9 @@ function applyResultSlideOptions(
   }
 
   if (slide.C?.Rs) {
-    slide.C.Rs.a = opts.allowRetry ? 1 : 0;
+    if (opts.allowRetry && (!slide.C.Rs.a || slide.C.Rs.a < 1)) {
+      slide.C.Rs.a = 1;
+    }
     if (!opts.showDetailedReport) {
       slide.C.Rs.sg = false;
     }
@@ -434,7 +436,8 @@ export function buildISpringDocument(
     }
 
     if (slide.s?.e) {
-      slide.s.e.pt = Number.isFinite(q.points) ? q.points : 10;
+      const pts = Number.isFinite(q.points) ? Math.max(0, q.points) : 10;
+      slide.s.e.pt = pts;
     }
 
     return slide;
