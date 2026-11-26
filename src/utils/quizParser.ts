@@ -399,3 +399,9 @@ export function questionHasImage(q: RichQuestion): boolean {
 export function getFirstQuestionTable(q: RichQuestion): RichTable | undefined {
   return q.questionNodes.find((n): n is RichTable => n.type === 'table');
 }
+
+export function getQuestionTables(q: RichQuestion): RichTable[] {
+  return q.questionNodes.filter(
+    (n): n is RichTable => n.type === 'table' && n.rows.length > 0
+  );
+}

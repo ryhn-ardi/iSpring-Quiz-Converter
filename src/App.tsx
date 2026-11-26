@@ -14,6 +14,7 @@ import {
   convertAutoRich,
   convertRuleRich,
   getFirstQuestionTable,
+  getQuestionTables,
   questionHasImage,
   questionHasRichFormatting,
   questionHasTable,
@@ -43,6 +44,7 @@ import {
   downloadAllTableImages,
   downloadQuestionTablePng,
   getTableImageFilename,
+  renderTableToPngBlob,
 } from './utils/tableImage';
 import {
   downloadSampleWordTemplate,
@@ -288,16 +290,81 @@ function RichTableRenderer({
   );
 }
 
+function TablePngPreview({
+  table,
+  mathEngine,
+  mathExportMode,
+  dollarSyntax,
+}: {
+  table: RichTable;
+  mathEngine: MathRenderEngine;
+  mathExportMode: MathExportMode;
+  dollarSyntax: DollarSyntaxMode;
+}) {
+  const [pngUrl, setPngUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    renderTableToPngBlob(table, mathExportMode, dollarSyntax)
+      .then((blob) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(blob);
+        setPngUrl(objectUrl);
+      })
+      .catch(() => {
+        if (active) setPngUrl(null);
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [table, mathExportMode, dollarSyntax]);
+
+  if (!pngUrl) {
+    return (
+      <RichTableRenderer
+        table={table}
+        mathEngine={mathEngine}
+        dollarSyntax={dollarSyntax}
+      />
+    );
+  }
+
+  return (
+    <div className="my-2.5 rounded-xl border border-indigo-200/80 bg-indigo-50/40 p-2.5">
+      <div className="flex items-center justify-between gap-2 mb-1.5 text-[10px] font-bold text-indigo-700">
+        <span className="flex items-center gap-1">
+          <ImageIcon className="w-3 h-3" />
+          Tabel otomatis dikonversi menjadi gambar PNG (siap iSpring)
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <img
+          src={pngUrl}
+          alt="Pratinjau gambar tabel soal"
+          className="max-w-full h-auto rounded-lg border border-slate-300 bg-white shadow-xs"
+        />
+      </div>
+    </div>
+  );
+}
+
 function RichNodesRenderer({
   nodes,
   prefixNumber,
   mathEngine,
   dollarSyntax,
+  tableExportMode = 'image',
+  mathExportMode = 'unicode',
 }: {
   nodes: RichContentNode[];
   prefixNumber?: number;
   mathEngine: MathRenderEngine;
   dollarSyntax: DollarSyntaxMode;
+  tableExportMode?: TableExportMode;
+  mathExportMode?: MathExportMode;
 }) {
   let renderedPrefix = false;
   return (
@@ -306,11 +373,20 @@ function RichNodesRenderer({
         if (node.type === 'table') {
           return (
             <React.Fragment key={idx}>
-              <RichTableRenderer
-                table={node}
-                mathEngine={mathEngine}
-                dollarSyntax={dollarSyntax}
-              />
+              {tableExportMode === 'image' ? (
+                <TablePngPreview
+                  table={node}
+                  mathEngine={mathEngine}
+                  mathExportMode={mathExportMode}
+                  dollarSyntax={dollarSyntax}
+                />
+              ) : (
+                <RichTableRenderer
+                  table={node}
+                  mathEngine={mathEngine}
+                  dollarSyntax={dollarSyntax}
+                />
+              )}
             </React.Fragment>
           );
         }
@@ -659,13 +735,19 @@ export default function App() {
     if (convertedQuestions.length === 0 || isExportingQuiz) return;
     setIsExportingQuiz(true);
     try {
-      const { filename, questionCount, formattedSlideCount, embeddedImageCount } =
-        await exportRichQuizToISpringQuiz(
-          convertedQuestions,
-          mathExportMode,
-          dollarSyntax,
-          quizResultOptions
-        );
+      const {
+        filename,
+        questionCount,
+        formattedSlideCount,
+        embeddedWordImageCount,
+        embeddedTableCount,
+      } = await exportRichQuizToISpringQuiz(
+        convertedQuestions,
+        mathExportMode,
+        dollarSyntax,
+        quizResultOptions,
+        tableExportMode
+      );
       const hasWarning = answerAnalysis.incompleteCount > 0;
       const incompleteWarn = hasWarning
         ? ` Catatan: ${answerAnalysis.incompleteCount} soal masih memiliki jawaban/kunci kosong.`
@@ -674,8 +756,11 @@ export default function App() {
       if (formattedSlideCount > 0) {
         detailParts.push(`${formattedSlideCount} soal berformat Bold/Italic/Underline`);
       }
-      if (embeddedImageCount > 0) {
-        detailParts.push(`${embeddedImageCount} gambar disematkan`);
+      if (embeddedTableCount > 0) {
+        detailParts.push(`${embeddedTableCount} tabel dijadikan gambar`);
+      }
+      if (embeddedWordImageCount > 0) {
+        detailParts.push(`${embeddedWordImageCount} gambar disematkan`);
       }
       showToast(
         `File "${filename}" (${detailParts.join(', ')}) siap dibuka di iSpring QuizMaker!${incompleteWarn}`,
@@ -717,7 +802,11 @@ export default function App() {
     if (isExportingImages) return;
     setIsExportingImages(true);
     try {
-      const { count, filename } = await downloadAllTableImages(convertedQuestions);
+      const { count, filename } = await downloadAllTableImages(
+        convertedQuestions,
+        mathExportMode,
+        dollarSyntax
+      );
       showToast(
         `${count} gambar tabel berhasil diunduh (${filename}). Simpan satu folder dengan file Excel sebelum impor ke iSpring.`,
         'success'
@@ -729,9 +818,14 @@ export default function App() {
     }
   };
 
-  const handleDownloadSingleTable = async (table: RichTable, questionIdx: number) => {
+  const handleDownloadSingleTable = async (tables: RichTable | RichTable[], questionIdx: number) => {
     try {
-      const filename = await downloadQuestionTablePng(table, questionIdx);
+      const filename = await downloadQuestionTablePng(
+        tables,
+        questionIdx,
+        mathExportMode,
+        dollarSyntax
+      );
       showToast(`Gambar tabel "${filename}" diunduh!`, 'success');
     } catch (err: any) {
       showToast(err?.message || 'Gagal mengunduh gambar tabel', 'error');
@@ -1342,7 +1436,7 @@ export default function App() {
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-bold flex items-center gap-1.5">
                     <TableIcon className="w-3.5 h-3.5 text-indigo-600" />
-                    Mode Ekspor Tabel ke iSpring ({tableQuestionsCount} soal):
+                    Mode Tabel ke iSpring ({tableQuestionsCount} soal bertabel):
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-1.5">
@@ -1355,7 +1449,7 @@ export default function App() {
                         : 'bg-indigo-100/50 border-transparent text-indigo-700/70 hover:bg-white/70'
                     }`}
                   >
-                    Gambar PNG di Kolom Image
+                    Otomatis Jadi Gambar PNG
                   </button>
                   <button
                     type="button"
@@ -1371,8 +1465,8 @@ export default function App() {
                 </div>
                 <p className="text-indigo-800/90 leading-relaxed">
                   {tableExportMode === 'image'
-                    ? 'Disarankan untuk iSpring: Excel tidak mendukung tabel di dalam sel teks. Kolom Image akan otomatis diisi tabel_soal_X.png — klik "Unduh Tabel", lalu taruh gambar satu folder dengan file Excel saat impor ke iSpring.'
-                    : 'Tabel ditulis ke kolom Question Text dengan pemisah "|" antar kolom (rapi dibaca, namun tidak menjadi tabel grafis di iSpring).'}
+                    ? 'Aktif otomatis: Tabel langsung dikonversi menjadi gambar PNG dan disematkan ke dalam slide file .quiz agar tampil rapi di iSpring. Untuk ekspor Excel, kolom Image otomatis diisi tabel_soal_X.png (unduh file gambarnya via tombol Unduh Tabel).'
+                    : 'Tabel ditulis sebagai teks dengan pemisah "|" antar kolom di .quiz dan Excel (tidak menjadi gambar tabel di iSpring).'}
                 </p>
               </div>
             )}
@@ -1733,7 +1827,9 @@ export default function App() {
                             {qTable && (
                               <button
                                 type="button"
-                                onClick={() => handleDownloadSingleTable(qTable, originalIndex)}
+                                onClick={() =>
+                                  handleDownloadSingleTable(getQuestionTables(q), originalIndex)
+                                }
                                 className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-emerald-200 bg-emerald-50/70 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1 transition-all cursor-pointer"
                                 title="Unduh tabel ini sebagai gambar PNG"
                               >
@@ -1816,6 +1912,8 @@ export default function App() {
                           prefixNumber={displayNum}
                           mathEngine={mathEngine}
                           dollarSyntax={dollarSyntax}
+                          tableExportMode={tableExportMode}
+                          mathExportMode={mathExportMode}
                         />
 
                         {q.answers.length === 0 ? (

@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { RichQuestion } from './quizParser';
+import { RichQuestion, getQuestionTables, questionHasTable } from './quizParser';
 import {
   RichText,
   TextSpan,
@@ -12,8 +12,13 @@ import {
   MathExportMode,
   replaceMathInRichTextWithUnicode,
 } from './mathEngine';
-import { renderQuestionWordImagesToBlob } from './wordImage';
-import { dataUrlToBlob } from './wordImage';
+import { TableExportMode } from './excelExport';
+import { renderQuestionTablesToPngBlob, renderTableToPngBlob } from './tableImage';
+import {
+  dataUrlToBlob,
+  renderQuestionWordImagesToBlob,
+  stackImageBlobsToPngBlob,
+} from './wordImage';
 
 const QUIZ_ASSET_PATHS = {
   metainfo: '/assets/aistudio/metainfo_9c2a0b05.json',
@@ -539,34 +544,76 @@ async function convertBlobToPngBlob(blob: Blob): Promise<Blob> {
   }
 }
 
-export async function prepareQuizImageAssets(questions: RichQuestion[]): Promise<{
+export async function prepareQuizImageAssets(
+  questions: RichQuestion[],
+  tableMode: TableExportMode = 'image',
+  mathMode: MathExportMode = 'unicode',
+  dollarSyntax: DollarSyntaxMode = 'auto'
+): Promise<{
   assets: ISpringImageAsset[];
   questionAssetIds: Map<number, string>;
+  embeddedWordImageCount: number;
+  embeddedTableCount: number;
 }> {
   const assets: ISpringImageAsset[] = [];
   const byHash = new Map<string, ISpringImageAsset>();
   const questionAssetIds = new Map<number, string>();
   let nextId = 1;
+  let embeddedWordImageCount = 0;
+  let embeddedTableCount = 0;
 
   for (let idx = 0; idx < questions.length; idx++) {
     const q = questions[idx];
-    if (!q.questionImages || q.questionImages.length === 0) continue;
+    const wordImages = q.questionImages || [];
+    const tables = tableMode === 'image' ? getQuestionTables(q) : [];
+
+    if (wordImages.length === 0 && tables.length === 0) continue;
 
     let blob: Blob;
     let ext: 'png' | 'jpeg' | 'gif';
 
-    if (q.questionImages.length === 1) {
-      const nativeExt = getISpringImageExt(q.questionImages[0].mimeType);
-      const rawBlob = dataUrlToBlob(q.questionImages[0].dataUrl);
-      if (nativeExt) {
-        blob = rawBlob;
-        ext = nativeExt;
+    if (wordImages.length > 0 && tables.length === 0) {
+      embeddedWordImageCount++;
+      if (wordImages.length === 1) {
+        const nativeExt = getISpringImageExt(wordImages[0].mimeType);
+        const rawBlob = dataUrlToBlob(wordImages[0].dataUrl);
+        if (nativeExt) {
+          blob = rawBlob;
+          ext = nativeExt;
+        } else {
+          blob = await convertBlobToPngBlob(rawBlob);
+          ext = 'png';
+        }
       } else {
-        blob = await convertBlobToPngBlob(rawBlob);
+        blob = await renderQuestionWordImagesToBlob(wordImages);
         ext = 'png';
       }
+    } else if (tables.length > 0 && wordImages.length === 0) {
+      embeddedTableCount++;
+      blob = await renderQuestionTablesToPngBlob(tables, mathMode, dollarSyntax);
+      ext = 'png';
     } else {
-      blob = await renderQuestionWordImagesToBlob(q.questionImages);
+      // Question has both Word image(s) and table(s): combine in document visual order
+      embeddedWordImageCount++;
+      embeddedTableCount++;
+      const blobs: Blob[] = [];
+      const seenImageUrls = new Set<string>();
+
+      for (const node of q.questionNodes) {
+        if (node.type === 'image') {
+          seenImageUrls.add(node.dataUrl);
+          blobs.push(dataUrlToBlob(node.dataUrl));
+        } else if (node.type === 'table' && node.rows.length > 0) {
+          blobs.push(await renderTableToPngBlob(node, mathMode, dollarSyntax));
+        }
+      }
+      for (const img of wordImages) {
+        if (!seenImageUrls.has(img.dataUrl)) {
+          blobs.push(dataUrlToBlob(img.dataUrl));
+        }
+      }
+
+      blob = blobs.length === 1 ? blobs[0] : await stackImageBlobsToPngBlob(blobs);
       ext = 'png';
     }
 
@@ -590,7 +637,7 @@ export async function prepareQuizImageAssets(questions: RichQuestion[]): Promise
     questionAssetIds.set(idx, asset.id);
   }
 
-  return { assets, questionAssetIds };
+  return { assets, questionAssetIds, embeddedWordImageCount, embeddedTableCount };
 }
 
 export function buildISpringDocument(
@@ -600,7 +647,8 @@ export function buildISpringDocument(
   dollarSyntax: DollarSyntaxMode = 'auto',
   resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS,
   imageAssets: ISpringImageAsset[] = [],
-  questionAssetIds?: Map<number, string>
+  questionAssetIds?: Map<number, string>,
+  tableMode: TableExportMode = 'image'
 ): { document: ISpringDocument; formattedSlideCount: number; totalPoints: number } {
   const doc = cloneJson(baseDocument);
 
@@ -629,7 +677,8 @@ export function buildISpringDocument(
     slide.tp = isMR ? 'MultipleResponse' : 'MultipleChoice';
     slide.v = true;
 
-    let questionRich = richNodesToRichText(q.questionNodes, true);
+    const hasTableAsImage = tableMode === 'image' && questionHasTable(q);
+    let questionRich = richNodesToRichText(q.questionNodes, !hasTableAsImage);
     if (mathMode !== 'raw') {
       questionRich = replaceMathInRichTextWithUnicode(questionRich, dollarSyntax);
     }
@@ -813,19 +862,27 @@ export async function exportRichQuizToISpringQuiz(
   questions: RichQuestion[],
   mathMode: MathExportMode = 'unicode',
   dollarSyntax: DollarSyntaxMode = 'auto',
-  resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS
+  resultOptions: QuizResultSlideOptions = DEFAULT_QUIZ_RESULT_OPTIONS,
+  tableMode: TableExportMode = 'image'
 ): Promise<{
   filename: string;
   questionCount: number;
   formattedSlideCount: number;
   embeddedImageCount: number;
+  embeddedWordImageCount: number;
+  embeddedTableCount: number;
 }> {
   if (questions.length === 0) {
     throw new Error('Tidak ada soal untuk diekspor ke file .quiz.');
   }
 
-  const [{ metainfoBytes, workspaceBytes, themeBytes, baseDocument }, { assets, questionAssetIds }] =
-    await Promise.all([loadQuizTemplates(), prepareQuizImageAssets(questions)]);
+  const [
+    { metainfoBytes, workspaceBytes, themeBytes, baseDocument },
+    { assets, questionAssetIds, embeddedWordImageCount, embeddedTableCount },
+  ] = await Promise.all([
+    loadQuizTemplates(),
+    prepareQuizImageAssets(questions, tableMode, mathMode, dollarSyntax),
+  ]);
 
   const { document: generatedDoc, formattedSlideCount, totalPoints } = buildISpringDocument(
     baseDocument,
@@ -834,7 +891,8 @@ export async function exportRichQuizToISpringQuiz(
     dollarSyntax,
     resultOptions,
     assets,
-    questionAssetIds
+    questionAssetIds,
+    tableMode
   );
 
   let metainfoContent: Uint8Array | string = metainfoBytes;
@@ -904,5 +962,7 @@ export async function exportRichQuizToISpringQuiz(
     questionCount: questions.length,
     formattedSlideCount,
     embeddedImageCount: questionAssetIds.size,
+    embeddedWordImageCount,
+    embeddedTableCount,
   };
 }

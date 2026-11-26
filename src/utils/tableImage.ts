@@ -1,6 +1,12 @@
 import JSZip from 'jszip';
 import { RichTable, RichText, TextSpan } from './richText';
-import { RichQuestion } from './quizParser';
+import { RichQuestion, getQuestionTables } from './quizParser';
+import {
+  DollarSyntaxMode,
+  MathExportMode,
+  replaceMathInRichTextWithUnicode,
+} from './mathEngine';
+import { stackImageBlobsToPngBlob } from './wordImage';
 
 type WrappedRun = {
   text: string;
@@ -136,16 +142,33 @@ function measureNaturalLineWidth(
   return maxW;
 }
 
-export async function renderTableToPngBlob(table: RichTable): Promise<Blob> {
+export async function renderTableToPngBlob(
+  table: RichTable,
+  mathMode: MathExportMode = 'unicode',
+  dollarSyntax: DollarSyntaxMode = 'auto'
+): Promise<Blob> {
+  if (!table.rows || table.rows.length === 0) {
+    throw new Error('Tabel kosong tidak dapat dikonversi menjadi gambar.');
+  }
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas 2D context tidak tersedia.');
 
-  const numCols = Math.max(...table.rows.map((r) => r.length), 1);
+  const normalizedRows = table.rows.map((row) =>
+    row.map((cell) => ({
+      ...cell,
+      lines:
+        mathMode !== 'raw'
+          ? replaceMathInRichTextWithUnicode(cell.lines, dollarSyntax)
+          : cell.lines,
+    }))
+  );
+
+  const numCols = Math.max(...normalizedRows.map((r) => r.length), 1);
 
   // Measure column widths
   const colWidths = Array(numCols).fill(MIN_COL_WIDTH);
-  for (const row of table.rows) {
+  for (const row of normalizedRows) {
     for (let c = 0; c < numCols; c++) {
       const cell = row[c];
       if (!cell) continue;
@@ -159,7 +182,7 @@ export async function renderTableToPngBlob(table: RichTable): Promise<Blob> {
   const wrappedGrid: WrappedLine[][][] = [];
   const rowHeights: number[] = [];
 
-  for (const row of table.rows) {
+  for (const row of normalizedRows) {
     const rowWrapped: WrappedLine[][] = [];
     let maxLines = 1;
     for (let c = 0; c < numCols; c++) {
@@ -196,8 +219,8 @@ export async function renderTableToPngBlob(table: RichTable): Promise<Blob> {
 
   // Draw cells
   let y = PADDING;
-  for (let r = 0; r < table.rows.length; r++) {
-    const row = table.rows[r];
+  for (let r = 0; r < normalizedRows.length; r++) {
+    const row = normalizedRows[r];
     const rowH = rowHeights[r];
     let x = PADDING;
 
@@ -262,27 +285,49 @@ export function getTableImageFilename(questionIndex: number): string {
   return `tabel_soal_${questionIndex + 1}.png`;
 }
 
+export async function renderQuestionTablesToPngBlob(
+  tables: RichTable[],
+  mathMode: MathExportMode = 'unicode',
+  dollarSyntax: DollarSyntaxMode = 'auto'
+): Promise<Blob> {
+  if (tables.length === 0) {
+    throw new Error('Soal ini tidak memiliki tabel.');
+  }
+  if (tables.length === 1) {
+    return renderTableToPngBlob(tables[0], mathMode, dollarSyntax);
+  }
+  const blobs = await Promise.all(
+    tables.map((t) => renderTableToPngBlob(t, mathMode, dollarSyntax))
+  );
+  return stackImageBlobsToPngBlob(blobs);
+}
+
 export async function downloadQuestionTablePng(
-  table: RichTable,
-  questionIndex: number
+  tables: RichTable | RichTable[],
+  questionIndex: number,
+  mathMode: MathExportMode = 'unicode',
+  dollarSyntax: DollarSyntaxMode = 'auto'
 ): Promise<string> {
-  const blob = await renderTableToPngBlob(table);
+  const tableList = Array.isArray(tables) ? tables : [tables];
+  const blob = await renderQuestionTablesToPngBlob(tableList, mathMode, dollarSyntax);
   const filename = getTableImageFilename(questionIndex);
   triggerDownload(blob, filename);
   return filename;
 }
 
 export async function downloadAllTableImages(
-  questions: RichQuestion[]
+  questions: RichQuestion[],
+  mathMode: MathExportMode = 'unicode',
+  dollarSyntax: DollarSyntaxMode = 'auto'
 ): Promise<{ count: number; filename: string }> {
-  const entries: { filename: string; table: RichTable }[] = [];
+  const entries: { filename: string; tables: RichTable[] }[] = [];
 
   questions.forEach((q, idx) => {
-    const firstTable = q.questionNodes.find((n): n is RichTable => n.type === 'table');
-    if (firstTable) {
+    const tables = getQuestionTables(q);
+    if (tables.length > 0) {
       entries.push({
         filename: getTableImageFilename(idx),
-        table: firstTable,
+        tables,
       });
     }
   });
@@ -292,14 +337,22 @@ export async function downloadAllTableImages(
   }
 
   if (entries.length === 1) {
-    const blob = await renderTableToPngBlob(entries[0].table);
+    const blob = await renderQuestionTablesToPngBlob(
+      entries[0].tables,
+      mathMode,
+      dollarSyntax
+    );
     triggerDownload(blob, entries[0].filename);
     return { count: 1, filename: entries[0].filename };
   }
 
   const zip = new JSZip();
   for (const entry of entries) {
-    const blob = await renderTableToPngBlob(entry.table);
+    const blob = await renderQuestionTablesToPngBlob(
+      entry.tables,
+      mathMode,
+      dollarSyntax
+    );
     zip.file(entry.filename, blob);
   }
 
