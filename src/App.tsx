@@ -370,34 +370,45 @@ export default function App() {
   const [isExportingMathImages, setIsExportingMathImages] = useState(false);
   const [isExportingWordImages, setIsExportingWordImages] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: '', type: 'info', visible: false });
-  const [adminToken, setAdminToken] = useState<string | null>(null);
-  const [adminUsername, setAdminUsername] = useState<string | null>(null);
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('ispring_admin_logged_in_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [adminUsername, setAdminUsername] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem('ispring_admin_logged_in_v1') === 'true' ? 'admin' : null;
+    } catch {
+      return null;
+    }
+  });
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
-  const [ownerProfile, setOwnerProfile] = useState<OwnerProfileData>({
-    ownerName: 'ms. Reyhan lohyaa',
-    ownerRole: 'Pemilik Website',
-    quote: 'Mengajar dengan hati, menyusun evaluasi lebih cepat dan rapi setiap hari.',
-    photoDataUrl: null,
+  const [ownerProfile, setOwnerProfile] = useState<OwnerProfileData>(() => {
+    const fallback: OwnerProfileData = {
+      ownerName: 'ms. Reyhan lohyaa',
+      ownerRole: 'Pemilik Website',
+      quote: 'Mengajar dengan hati, menyusun evaluasi lebih cepat dan rapi setiap hari.',
+      photoDataUrl: null,
+    };
+    try {
+      const raw = localStorage.getItem('ispring_owner_profile_v1');
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw) as Partial<OwnerProfileData>;
+      return {
+        ownerName: typeof parsed.ownerName === 'string' && parsed.ownerName.trim() ? parsed.ownerName : fallback.ownerName,
+        ownerRole: typeof parsed.ownerRole === 'string' && parsed.ownerRole.trim() ? parsed.ownerRole : fallback.ownerRole,
+        quote: typeof parsed.quote === 'string' ? parsed.quote : fallback.quote,
+        photoDataUrl: typeof parsed.photoDataUrl === 'string' ? parsed.photoDataUrl : null,
+        updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
+      };
+    } catch {
+      return fallback;
+    }
   });
   const headerDocxInputRef = useRef<HTMLInputElement>(null);
   const questionCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
-
-  useEffect(() => {
-    let active = true;
-    fetch('/api/profile')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (active && data?.profile) {
-          setOwnerProfile(data.profile);
-        }
-      })
-      .catch(() => {
-        // Keep default profile silently if network is busy
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ message, type, visible: true });
@@ -406,30 +417,36 @@ export default function App() {
     }, 4500);
   };
 
-  const handleAdminLoginSuccess = (token: string, username: string) => {
-    setAdminToken(token);
+  const handleAdminLoginSuccess = (username: string) => {
+    setIsAdminLoggedIn(true);
     setAdminUsername(username);
+    try {
+      sessionStorage.setItem('ispring_admin_logged_in_v1', 'true');
+    } catch {
+      // Ignore storage error
+    }
     showToast(`Selamat datang, ${username}! Anda kini dapat mengubah foto & quote.`, 'success');
   };
 
-  const handleAdminLogout = async () => {
-    const token = adminToken;
-    setAdminToken(null);
+  const handleAdminLogout = () => {
+    setIsAdminLoggedIn(false);
     setAdminUsername(null);
-    if (token) {
-      fetch('/api/admin/logout', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      }).catch(() => {});
+    try {
+      sessionStorage.removeItem('ispring_admin_logged_in_v1');
+    } catch {
+      // Ignore storage error
     }
     showToast('Anda telah keluar dari sesi admin.', 'info');
   };
 
-  const handleSessionExpired = () => {
-    setAdminToken(null);
-    setAdminUsername(null);
-    setIsLoginModalOpen(true);
-    showToast('Sesi admin kedaluwarsa. Silakan login kembali.', 'error');
+  const handleOwnerProfileUpdated = (next: OwnerProfileData): boolean => {
+    try {
+      localStorage.setItem('ispring_owner_profile_v1', JSON.stringify(next));
+      setOwnerProfile(next);
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   const clearInput = () => {
@@ -934,7 +951,7 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2.5 shrink-0">
-            {adminToken ? (
+            {isAdminLoggedIn ? (
               <>
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg whitespace-nowrap shrink-0">
                   <ShieldCheck className="w-3.5 h-3.5" />
@@ -970,11 +987,9 @@ export default function App() {
         <div className="lg:col-span-12">
           <OwnerSpotlight
             profile={ownerProfile}
-            isAdmin={Boolean(adminToken)}
-            adminToken={adminToken}
-            onProfileUpdated={setOwnerProfile}
+            isAdmin={isAdminLoggedIn}
+            onProfileUpdated={handleOwnerProfileUpdated}
             onOpenLogin={() => setIsLoginModalOpen(true)}
-            onSessionExpired={handleSessionExpired}
             onNotify={showToast}
           />
         </div>

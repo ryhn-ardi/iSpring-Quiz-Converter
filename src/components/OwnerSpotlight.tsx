@@ -12,10 +12,8 @@ export type OwnerProfileData = {
 type OwnerSpotlightProps = {
   profile: OwnerProfileData;
   isAdmin: boolean;
-  adminToken: string | null;
-  onProfileUpdated: (next: OwnerProfileData) => void;
+  onProfileUpdated: (next: OwnerProfileData) => boolean;
   onOpenLogin: () => void;
-  onSessionExpired: () => void;
   onNotify: (message: string, type: 'info' | 'success' | 'error') => void;
 };
 
@@ -85,10 +83,8 @@ async function readAndResizeImageFile(file: File): Promise<string> {
 export const OwnerSpotlight: React.FC<OwnerSpotlightProps> = ({
   profile,
   isAdmin,
-  adminToken,
   onProfileUpdated,
   onOpenLogin,
-  onSessionExpired,
   onNotify,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -136,9 +132,9 @@ export const OwnerSpotlight: React.FC<OwnerSpotlightProps> = ({
     }
   };
 
-  const handleSave = async (e: React.FormEvent) => {
+  const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!adminToken || saving) return;
+    if (!isAdmin || saving) return;
 
     const cleanName = draftName.trim();
     if (!cleanName) {
@@ -148,37 +144,20 @@ export const OwnerSpotlight: React.FC<OwnerSpotlightProps> = ({
 
     setSaving(true);
     try {
-      const res = await fetch('/api/admin/profile', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          ownerName: cleanName,
-          ownerRole: draftRole.trim() || 'Pemilik Website',
-          quote: draftQuote.trim(),
-          photoDataUrl: draftPhoto,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-
-      if (res.status === 401) {
-        onSessionExpired();
+      const nextProfile: OwnerProfileData = {
+        ownerName: cleanName.slice(0, 80),
+        ownerRole: (draftRole.trim() || 'Pemilik Website').slice(0, 80),
+        quote: draftQuote.trim().slice(0, 400),
+        photoDataUrl: isSafeImageDataUrl(draftPhoto) ? draftPhoto : null,
+        updatedAt: new Date().toISOString(),
+      };
+      const savedOk = onProfileUpdated(nextProfile);
+      if (!savedOk) {
+        onNotify('Ukuran foto terlalu besar untuk disimpan di browser. Gunakan foto yang lebih kecil.', 'error');
         return;
-      }
-      if (!res.ok) {
-        onNotify(data?.error || 'Gagal menyimpan perubahan profil.', 'error');
-        return;
-      }
-
-      if (data?.profile) {
-        onProfileUpdated(data.profile);
       }
       setIsEditing(false);
       onNotify('Foto pemilik & quote berhasil diperbarui.', 'success');
-    } catch {
-      onNotify('Gagal menghubungi server saat menyimpan.', 'error');
     } finally {
       setSaving(false);
     }
